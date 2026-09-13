@@ -189,6 +189,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_pane_up = ""     # optional, e.g. "ctrl+shift+alt+up"
 # resize_pane_right = ""  # optional, e.g. "ctrl+shift+alt+right"
 # toggle_sidebar = "prefix+b"
+# toggle_sidebar_compact = ""               # Toggle the compact sidebar strip, regardless of ui.sidebar_collapsed_mode. Unset by default.
+# toggle_sidebar_hidden = "prefix+shift+b"  # Toggle a hidden sidebar; pressing again restores the previous shape.
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

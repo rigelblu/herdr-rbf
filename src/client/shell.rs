@@ -30,6 +30,7 @@ mod preferences;
 mod render;
 mod scroll;
 mod settings;
+mod sidebar_shape;
 mod state;
 mod surface_patch;
 mod word_selection;
