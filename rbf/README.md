@@ -19,6 +19,14 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - The shape and what hide returns to survive a relaunch or reattach
 - A hidden sidebar has no click target, so the key is the only way back. `prefix+?` lists both keys under `toggle sidebar`
 
+## 🟠⋯ Hide the tab bar
+- `prefix+t` hides the tab bar and gives its row to your panes. Press it again to bring it back
+- Hidden stays hidden at any tab count, even where `ui.hide_tab_bar_when_single_tab` would show it, with the tab bar at the top or the bottom
+- It stays hidden across a relaunch or reattach
+- Hide the sidebar too (`prefix+shift+b`) and your pane fills the whole terminal
+- `prefix+n`, `prefix+p`, and `prefix+1..9` still switch tabs while it's hidden
+- Rebind it with `keys.toggle_tab_bar` under `[keys]`, e.g. `toggle_tab_bar = "prefix+y"`. `prefix+?` lists it under the sidebar keys
+
 # 🔵⋯ Versions
 - This flavour's release version lives in `rbf/RBF_VERSION`, its history in `rbf/CHANGELOG.md`
 - Upstream's own version file tracks upstream, not this flavour
