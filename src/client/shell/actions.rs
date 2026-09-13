@@ -30,6 +30,13 @@ impl ClientShellState {
                 outcome.resize = true;
                 self.persist_chrome_preferences(outcome);
             }
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleTabBar) => {
+                self.tab_bar_hidden = !self.tab_bar_hidden;
+                self.invalidate_pane_surface();
+                outcome.repaint = true;
+                outcome.resize = true;
+                self.persist_chrome_preferences(outcome);
+            }
             crate::input::KeybindMatch::Action(action) => {
                 if self.workspace_preview_action_blocked()
                     && matches!(
