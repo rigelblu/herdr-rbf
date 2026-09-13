@@ -2031,8 +2031,9 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.sidebar_toggle, point) {
-                    self.sidebar_collapsed = !self.sidebar_collapsed;
-                    self.sidebar_collapsed_manual = true;
+                    self.apply_sidebar_shape_action(
+                        super::sidebar_shape::SidebarShapeToggle::Collapsed,
+                    );
                     self.invalidate_pane_surface();
                     outcome.repaint = true;
                     outcome.resize = true;
