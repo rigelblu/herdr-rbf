@@ -63,6 +63,7 @@ pub(crate) enum KeybindAction {
     ToggleSidebar,
     ToggleSidebarCompact,
     ToggleSidebarHidden,
+    ToggleTabBar,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -157,6 +158,7 @@ pub(crate) fn resolve_non_indexed_action(
             &keybinds.toggle_sidebar_hidden,
             KeybindAction::ToggleSidebarHidden,
         ),
+        (&keybinds.toggle_tab_bar, KeybindAction::ToggleTabBar),
         (&keybinds.reload_config, KeybindAction::ReloadConfig),
         (
             &keybinds.open_notification_target,
