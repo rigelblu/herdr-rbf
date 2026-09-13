@@ -23,6 +23,10 @@ pub(super) struct ClientChromePreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_collapsed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) sidebar_collapsed_mode: Option<crate::config::SidebarCollapsedModeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) sidebar_hide_restore: Option<super::sidebar_shape::SidebarHideRestore>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) collapsed_groups: Vec<String>,

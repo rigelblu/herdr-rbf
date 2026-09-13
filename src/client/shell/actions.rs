@@ -10,9 +10,20 @@ impl ClientShellState {
             crate::input::KeybindMatch::Action(crate::input::KeybindAction::Detach) => {
                 outcome.detach = true;
             }
-            crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleSidebar) => {
-                self.sidebar_collapsed = !self.sidebar_collapsed;
-                self.sidebar_collapsed_manual = true;
+            crate::input::KeybindMatch::Action(
+                action @ (crate::input::KeybindAction::ToggleSidebar
+                | crate::input::KeybindAction::ToggleSidebarCompact
+                | crate::input::KeybindAction::ToggleSidebarHidden),
+            ) => {
+                self.apply_sidebar_shape_action(match action {
+                    crate::input::KeybindAction::ToggleSidebarCompact => {
+                        super::sidebar_shape::SidebarShapeToggle::Compact
+                    }
+                    crate::input::KeybindAction::ToggleSidebarHidden => {
+                        super::sidebar_shape::SidebarShapeToggle::Hidden
+                    }
+                    _ => super::sidebar_shape::SidebarShapeToggle::Collapsed,
+                });
                 self.reveal_navigation_workspace = true;
                 self.invalidate_pane_surface();
                 outcome.repaint = true;
