@@ -454,6 +454,8 @@ pub struct KeysConfig {
     pub toggle_sidebar_compact: BindingConfig,
     /// Toggle a hidden sidebar; pressing again restores the previous shape. Default: "prefix+shift+b"
     pub toggle_sidebar_hidden: BindingConfig,
+    /// Toggle a hidden tab bar; hidden wins over ui.hide_tab_bar_when_single_tab. Default: "prefix+t"
+    pub toggle_tab_bar: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -589,6 +591,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar_hidden: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_tab_bar: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
     command: Option<Vec<CommandKeybindConfig>>,
@@ -678,6 +682,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_sidebar);
         apply_field!(toggle_sidebar_compact);
         apply_field!(toggle_sidebar_hidden);
+        apply_field!(toggle_tab_bar);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -784,6 +789,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_effective_action_field!(toggle_sidebar_compact, keybinds.toggle_sidebar_compact);
         copy_effective_action_field!(toggle_sidebar_hidden, keybinds.toggle_sidebar_hidden);
+        copy_effective_action_field!(toggle_tab_bar, keybinds.toggle_tab_bar);
         copy_user_field!(indexed);
 
         profile
@@ -1154,6 +1160,7 @@ impl Default for KeysConfig {
             toggle_sidebar: BindingConfig::one("prefix+b"),
             toggle_sidebar_compact: BindingConfig::empty(),
             toggle_sidebar_hidden: BindingConfig::one("prefix+shift+b"),
+            toggle_tab_bar: BindingConfig::one("prefix+t"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),

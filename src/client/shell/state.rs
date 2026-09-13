@@ -905,6 +905,7 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_collapsed: bool,
     pub(super) sidebar_collapsed_mode_override: Option<SidebarCollapsedModeConfig>,
     pub(super) sidebar_hide_restore: Option<super::sidebar_shape::SidebarHideRestore>,
+    pub(super) tab_bar_hidden: bool,
     pub(super) sidebar_collapsed_manual: bool,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
@@ -1068,6 +1069,7 @@ impl ClientShellState {
             sidebar_collapsed: sidebar_shape.collapsed,
             sidebar_collapsed_mode_override: sidebar_shape.mode_override,
             sidebar_hide_restore: sidebar_shape.hide_restore,
+            tab_bar_hidden: preferences.tab_bar_hidden.unwrap_or(false),
             sidebar_collapsed_manual: preferences.sidebar_collapsed.is_some(),
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
@@ -1245,6 +1247,7 @@ impl ClientShellState {
             self.focused_tab_count(),
             self.sidebar_width,
             self.effective_sidebar_collapsed_mode(),
+            self.tab_bar_hidden,
         )
     }
 

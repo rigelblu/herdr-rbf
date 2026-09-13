@@ -191,6 +191,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # toggle_sidebar = "prefix+b"
 # toggle_sidebar_compact = ""               # Toggle the compact sidebar strip, regardless of ui.sidebar_collapsed_mode. Unset by default.
 # toggle_sidebar_hidden = "prefix+shift+b"  # Toggle a hidden sidebar; pressing again restores the previous shape.
+# toggle_tab_bar = "prefix+t"               # Toggle a hidden tab bar; hidden wins over ui.hide_tab_bar_when_single_tab.
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.
