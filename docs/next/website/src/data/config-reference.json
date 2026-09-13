@@ -848,6 +848,12 @@
           "description": "Toggle a hidden sidebar; pressing again restores the previous shape."
         },
         {
+          "key": "keys.toggle_tab_bar",
+          "type": "keybinding",
+          "default": "\"prefix+t\"",
+          "description": "Toggle a hidden tab bar; hidden wins over ui.hide_tab_bar_when_single_tab."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",

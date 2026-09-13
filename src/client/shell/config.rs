@@ -64,6 +64,7 @@ impl ClientShellState {
                 .sidebar_collapsed_manual
                 .then_some(self.sidebar_hide_restore)
                 .flatten(),
+            tab_bar_hidden: self.tab_bar_hidden.then_some(true),
             agent_panel_sort: self
                 .agent_panel_sort_manual
                 .then_some(self.config.agent_panel_sort),
@@ -373,6 +374,7 @@ impl ClientShellConfig {
         tab_count: usize,
         sidebar_width: u16,
         sidebar_collapsed_mode: SidebarCollapsedModeConfig,
+        tab_bar_hidden: bool,
     ) -> ClientShellLayout {
         if cols <= self.mobile_width_threshold {
             let header_height = rows.min(2);
@@ -399,7 +401,8 @@ impl ClientShellConfig {
         }
         .min(cols.saturating_sub(1));
         let main = Rect::new(sidebar_width, 0, cols.saturating_sub(sidebar_width), rows);
-        let show_tab_bar = rows > 1 && !(self.hide_tab_bar_when_single_tab && tab_count == 1);
+        let show_tab_bar =
+            rows > 1 && !tab_bar_hidden && !(self.hide_tab_bar_when_single_tab && tab_count == 1);
         let tab_height = u16::from(show_tab_bar);
         let (tab_bar, pane_surface) = match self.tab_bar_position {
             TabBarPositionConfig::Top => (
@@ -451,6 +454,7 @@ impl ClientShellConfig {
                 0,
                 sidebar_width,
                 sidebar_shape.effective_mode(self.sidebar_collapsed_mode),
+                self.preferences.tab_bar_hidden.unwrap_or(false),
             )
             .pane_surface;
         ClientSurfaceSize {
