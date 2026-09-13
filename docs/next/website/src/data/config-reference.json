@@ -836,6 +836,18 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.toggle_sidebar_compact",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Toggle the compact sidebar strip, regardless of ui.sidebar_collapsed_mode. Unset by default."
+        },
+        {
+          "key": "keys.toggle_sidebar_hidden",
+          "type": "keybinding",
+          "default": "\"prefix+shift+b\"",
+          "description": "Toggle a hidden sidebar; pressing again restores the previous shape."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",

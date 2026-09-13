@@ -454,6 +454,10 @@ pub struct KeysConfig {
     pub resize_pane_right: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
+    /// Toggle the compact sidebar strip, regardless of ui.sidebar_collapsed_mode. Unset by default.
+    pub toggle_sidebar_compact: BindingConfig,
+    /// Toggle a hidden sidebar; pressing again restores the previous shape. Default: "prefix+shift+b"
+    pub toggle_sidebar_hidden: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -586,6 +590,10 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_sidebar_compact: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_sidebar_hidden: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
     command: Option<Vec<CommandKeybindConfig>>,
@@ -674,6 +682,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_pane_up);
         apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
+        apply_field!(toggle_sidebar_compact);
+        apply_field!(toggle_sidebar_hidden);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -779,6 +789,8 @@ impl KeysConfig {
         copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(toggle_sidebar_compact, keybinds.toggle_sidebar_compact);
+        copy_effective_action_field!(toggle_sidebar_hidden, keybinds.toggle_sidebar_hidden);
         copy_user_field!(indexed);
 
         profile
@@ -1148,6 +1160,8 @@ impl Default for KeysConfig {
             resize_pane_up: BindingConfig::empty(),
             resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_sidebar_compact: BindingConfig::empty(),
+            toggle_sidebar_hidden: BindingConfig::one("prefix+shift+b"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),

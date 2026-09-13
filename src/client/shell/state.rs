@@ -857,6 +857,8 @@ pub(crate) struct ClientShellState {
     pub(super) graphics_cell_size: crate::kitty_graphics::HostCellSize,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) sidebar_collapsed: bool,
+    pub(super) sidebar_collapsed_mode_override: Option<SidebarCollapsedModeConfig>,
+    pub(super) sidebar_hide_restore: Option<super::sidebar_shape::SidebarHideRestore>,
     pub(super) sidebar_collapsed_manual: bool,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
@@ -977,9 +979,10 @@ impl ClientShellState {
         let overlay = config
             .startup_onboarding
             .then_some(ClientShellOverlay::Onboarding);
-        let sidebar_collapsed = preferences
-            .sidebar_collapsed
-            .unwrap_or(config.sidebar_start_collapsed);
+        let sidebar_shape = super::sidebar_shape::SidebarShapeState::from_preferences(
+            &preferences,
+            config.sidebar_start_collapsed,
+        );
         let (min_width, max_width) = crate::config::validated_sidebar_bounds(
             config.sidebar_min_width,
             config.sidebar_max_width,
@@ -1021,7 +1024,9 @@ impl ClientShellState {
                 height_px: 1,
             },
             popup_terminal_id: None,
-            sidebar_collapsed,
+            sidebar_collapsed: sidebar_shape.collapsed,
+            sidebar_collapsed_mode_override: sidebar_shape.mode_override,
+            sidebar_hide_restore: sidebar_shape.hide_restore,
             sidebar_collapsed_manual: preferences.sidebar_collapsed.is_some(),
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
@@ -1200,6 +1205,7 @@ impl ClientShellState {
             self.sidebar_collapsed,
             self.focused_tab_count(),
             self.sidebar_width,
+            self.effective_sidebar_collapsed_mode(),
         )
     }
 

@@ -56,6 +56,14 @@ impl ClientShellState {
             sidebar_collapsed: self
                 .sidebar_collapsed_manual
                 .then_some(self.sidebar_collapsed),
+            sidebar_collapsed_mode: self
+                .sidebar_collapsed_manual
+                .then_some(self.sidebar_collapsed_mode_override)
+                .flatten(),
+            sidebar_hide_restore: self
+                .sidebar_collapsed_manual
+                .then_some(self.sidebar_hide_restore)
+                .flatten(),
             agent_panel_sort: self
                 .agent_panel_sort_manual
                 .then_some(self.config.agent_panel_sort),
@@ -364,6 +372,7 @@ impl ClientShellConfig {
         sidebar_collapsed: bool,
         tab_count: usize,
         sidebar_width: u16,
+        sidebar_collapsed_mode: SidebarCollapsedModeConfig,
     ) -> ClientShellLayout {
         if cols <= self.mobile_width_threshold {
             let header_height = rows.min(2);
@@ -376,7 +385,7 @@ impl ClientShellConfig {
         }
 
         let sidebar_width = if sidebar_collapsed {
-            match self.sidebar_collapsed_mode {
+            match sidebar_collapsed_mode {
                 SidebarCollapsedModeConfig::Compact => 4,
                 SidebarCollapsedModeConfig::Hidden => 0,
             }
@@ -422,10 +431,10 @@ impl ClientShellConfig {
     }
 
     pub(crate) fn initial_surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
-        let sidebar_collapsed = self
-            .preferences
-            .sidebar_collapsed
-            .unwrap_or(self.sidebar_start_collapsed);
+        let sidebar_shape = super::sidebar_shape::SidebarShapeState::from_preferences(
+            &self.preferences,
+            self.sidebar_start_collapsed,
+        );
         let (min_width, max_width) =
             crate::config::validated_sidebar_bounds(self.sidebar_min_width, self.sidebar_max_width)
                 .unwrap_or((18, 36));
@@ -435,7 +444,14 @@ impl ClientShellConfig {
             .unwrap_or(self.sidebar_width)
             .clamp(min_width, max_width);
         let surface = self
-            .layout(cols, rows, sidebar_collapsed, 0, sidebar_width)
+            .layout(
+                cols,
+                rows,
+                sidebar_shape.collapsed,
+                0,
+                sidebar_width,
+                sidebar_shape.effective_mode(self.sidebar_collapsed_mode),
+            )
             .pane_surface;
         ClientSurfaceSize {
             cols: surface.width.max(1),
