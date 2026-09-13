@@ -1,0 +1,10 @@
+# Use $REPO/docs/conventions/metadata.md
+[repo]
+product = "@herdr-rbf"
+owner = "@tom-rigelblu"
+
+[project]
+type = "product" # what this dir is: product | project
+product_id = ["hrdr"]  # short id prefix(es) this product ships, e.g. ["lum"]
+project_type = "improvements"  # set by prj-setup at scaffold: new venture | new product | new features | ...
+rb_drive_store = "herdr-rbf-drive"  # per-product dedicated store — payload at the store root; omit → shared default store namespaced by repo-relative path
