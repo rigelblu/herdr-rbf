@@ -143,6 +143,11 @@ fn toggle_tab_bar_defaults_to_prefix_t() {
         .iter()
         .position(|(_, label)| label == "toggle hidden sidebar")
         .expect("hidden sidebar row");
+    let (key, label) = &panes[hidden_sidebar - 1];
+    assert_eq!(
+        (key.as_str(), label.as_ref()),
+        ("unset", "toggle compact sidebar")
+    );
     let (key, label) = &panes[hidden_sidebar + 1];
     assert_eq!(
         (key.as_str(), label.as_ref()),
