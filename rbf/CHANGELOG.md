@@ -9,6 +9,18 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.4.0 (2026-09-14)
+## 🟠⋯ Added for End Users
+- 2026-09-14 - feat (user need) | `rbf/scripts/install-rbf.sh` builds the checked-out fork and installs it as your daily `herdr`, handing every running session to the new build without stopping its panes. `--dry-run` previews and `--rollback` undoes
+
+## 🟠⋯ Added for Technical Users
+- 2026-09-14 - feat (technical) | fork builds refuse `herdr update`, and the update notice and `herdr channel set` name the install script. Breaking: `herdr update` no longer works on fork builds, and open windows close during an install (reattach with `herdr session attach <name>`)
+
+## 🟠⋯ Fixed for End Users
+- 2026-09-14 - fix (user need) | one unrecognized value in your saved sidebar preferences no longer resets all of them; only that value falls back to its default
+
+---
+
 # 🔵⋯ v0.3.0 (2026-09-14)
 ## 🟠⋯ Added for End Users
 - 2026-09-14 - feat (user need) | ⌘K clears the focused pane's screen and scrollback, the same as in cmux. Full-screen programs like vim only get a redraw

@@ -27,6 +27,21 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - `prefix+n`, `prefix+p`, and `prefix+1..9` still switch tabs while it's hidden
 - Rebind it with `keys.toggle_tab_bar` under `[keys]`, e.g. `toggle_tab_bar = "prefix+y"`. `prefix+?` lists it under the sidebar keys
 
+# 🔵⋯ Install
+## 🟠⋯ Install your fork build as your daily `herdr`
+- From the herdr-rbf checkout, run `rbf/scripts/install-rbf.sh --dry-run`, read the plan, then run `rbf/scripts/install-rbf.sh`
+- It builds whatever revision is checked out (`cargo build --release --locked`) and puts it at `~/.local/bin/herdr`. The binary it replaces is kept as `~/.local/bin/herdr.previous`
+- Every running session is handed to the new build, and pane processes keep running, agents included. The session you typed the install into goes last
+- Every attached `herdr` window closes during its session's handoff. Reattach with `herdr` for `default`, or `herdr session attach <name>`. The install prints each command, and panes redraw when a window reattaches
+- `rbf/scripts/install-rbf.sh --rollback` swaps `herdr.previous` back in and hands off the same way. Run it again to undo the rollback
+- Exit codes: `0` installed and every running session handed off; `1` nothing installed; `2` usage error; `3` installed, but at least one session wasn't handed off
+- Each run logs to `~/Library/Logs/herdr-rbf-install.log`
+- Needs the Rust toolchain from `rust-toolchain.toml`, Zig 0.16.0, `python3`, and `~/.local/bin` on `PATH` ahead of any other `herdr`
+
+## 🟠⋯ `herdr update` is refused on fork builds
+- `herdr update` and `herdr update --handoff` exit with `self-update is disabled for herdr-rbf builds` rather than swap your fork back to upstream's release
+- The update notice still tells you when upstream ships a release, and names the install script, so you know to sync
+
 # 🔵⋯ Versions
 - This flavour's release version lives in `rbf/RBF_VERSION`, its history in `rbf/CHANGELOG.md`
 - Upstream's own version file tracks upstream, not this flavour
