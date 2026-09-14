@@ -28,6 +28,8 @@ enum ActorState {
 
 pub(crate) struct PtyReadResult {
     pub terminal_responses: Vec<Bytes>,
+    /// Send Ctrl+L after this read's responses if the terminal is in raw mode (herdr-rbf `hrdr-4`).
+    pub ctrl_l_if_raw_mode: bool,
 }
 
 impl PtyReadResult {
@@ -35,6 +37,7 @@ impl PtyReadResult {
     pub(crate) fn empty() -> Self {
         Self {
             terminal_responses: Vec::new(),
+            ctrl_l_if_raw_mode: false,
         }
     }
 }
@@ -85,6 +88,7 @@ enum PtyIoControlCommand {
     BeginHandoff(std_mpsc::Sender<std::io::Result<()>>),
     DuplicateForHandoff(std_mpsc::Sender<std::io::Result<RawFd>>),
     ForegroundProcessGroup(std_mpsc::Sender<Option<u32>>),
+    InputCanonicalMode(std_mpsc::Sender<Option<bool>>),
     RollbackHandoff(std_mpsc::Sender<std::io::Result<()>>),
     ReleaseAfterCommit(std_mpsc::Sender<std::io::Result<()>>),
     Shutdown,
@@ -303,6 +307,16 @@ impl PtyIoActorHandle {
         let (reply_tx, reply_rx) = std_mpsc::channel();
         self.control_tx
             .send(PtyIoControlCommand::ForegroundProcessGroup(reply_tx))
+            .ok()?;
+        self.wake_actor();
+        reply_rx.recv_timeout(Duration::from_secs(1)).ok()?
+    }
+
+    /// Whether the pane's terminal is in canonical (cooked) input mode; `Some(false)` is raw mode.
+    pub(crate) fn input_canonical_mode(&self) -> Option<bool> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        self.control_tx
+            .send(PtyIoControlCommand::InputCanonicalMode(reply_tx))
             .ok()?;
         self.wake_actor();
         reply_rx.recv_timeout(Duration::from_secs(1)).ok()?
@@ -691,6 +705,10 @@ impl PtyIoActorRunner {
                     crate::platform::foreground_process_group_id_for_tty_fd(self.file.as_raw_fd());
                 let _ = reply.send(result);
             }
+            PtyIoControlCommand::InputCanonicalMode(reply) => {
+                let result = crate::platform::tty_fd_input_canonical(self.file.as_raw_fd());
+                let _ = reply.send(result);
+            }
             PtyIoControlCommand::RollbackHandoff(reply) => {
                 self.pending_handoff.take();
                 let result = if self.state == ActorState::Released {
@@ -828,7 +846,14 @@ impl PtyIoActorRunner {
                 let _order = response_order
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let result = (self.on_read)(&buf[..n]);
+                let mut result = (self.on_read)(&buf[..n]);
+                // Read the mode here, on the thread that owns the fd: asking this actor through
+                // its control channel from inside its own read would wait on itself.
+                if result.ctrl_l_if_raw_mode
+                    && crate::platform::tty_fd_input_canonical(self.file.as_raw_fd()) != Some(true)
+                {
+                    result.terminal_responses.push(Bytes::from_static(b"\x0c"));
+                }
                 self.controls
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1035,6 +1060,8 @@ fn input_submission_closed_error() -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
+    mod clear_screen;
+
     use super::*;
     use std::{
         io::{Read, Write},
@@ -1686,6 +1713,7 @@ mod tests {
                 } else {
                     Bytes::from_static(b"query-dark")
                 }],
+                ctrl_l_if_raw_mode: false,
             }),
             on_reader_exit: None,
             poll_observer: None,

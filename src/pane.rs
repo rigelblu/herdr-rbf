@@ -1275,6 +1275,9 @@ enum PaneRuntimeIo {
     TestChannel {
         sender: mpsc::Sender<Bytes>,
         resize_tx: watch::Sender<(u16, u16, u32, u32)>,
+        // Read only by the Unix `input_canonical`; other targets always send Ctrl+L.
+        #[cfg_attr(not(unix), allow(dead_code))]
+        input_canonical: Arc<Mutex<Option<bool>>>,
     },
 }
 
@@ -1305,6 +1308,24 @@ impl PaneRuntimeIo {
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
         }
+    }
+
+    /// Whether the pane's terminal is in canonical (cooked) input mode; `None` when unreadable.
+    #[cfg(unix)]
+    fn input_canonical(&self) -> Option<bool> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.input_canonical_mode(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel {
+                input_canonical, ..
+            } => input_canonical.lock().ok().and_then(|mode| *mode),
+        }
+    }
+
+    /// Terminal modes aren't readable here.
+    #[cfg(not(unix))]
+    fn input_canonical(&self) -> Option<bool> {
+        None
     }
 
     #[cfg(unix)]
@@ -2240,6 +2261,7 @@ impl PaneRuntime {
                 }
                 PtyReadResult {
                     terminal_responses: result.terminal_responses,
+                    ctrl_l_if_raw_mode: result.ctrl_l_if_raw_mode,
                 }
             });
             let exit_events = events.clone();
@@ -2436,6 +2458,7 @@ impl PaneRuntime {
                 }
                 PtyReadResult {
                     terminal_responses: result.terminal_responses,
+                    ctrl_l_if_raw_mode: result.ctrl_l_if_raw_mode,
                 }
             });
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
@@ -2903,6 +2926,45 @@ impl PaneRuntime {
 
     pub(crate) fn content_seq(&self) -> u64 {
         self.content_seq.load(Ordering::Acquire)
+    }
+
+    /// Clear the pane like ⌘K in cmux.
+    ///
+    /// The primary screen is erased with its scrollback, through the same path as child output;
+    /// a full-screen program on the alternate screen is never erased behind its back. An erase
+    /// that would split an escape sequence the program is still sending waits for the next PTY
+    /// read that reaches ground. Ctrl+L goes to the program only when its terminal is in raw
+    /// mode: a cooked-mode command leaves the key queued for the shell, which would clear again
+    /// at its next prompt.
+    pub(crate) fn clear_screen(&self) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        // Raw or unreadable mode: a program is reading keys now, so Ctrl+L repaints it.
+        let send_form_feed = self.io.input_canonical() != Some(true);
+        let content_write_guard = match self.content_write_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let plan = self.terminal.plan_clear_screen(send_form_feed);
+        if plan == self::terminal::ClearScreenPlan::EraseNow {
+            self.content_seq.fetch_add(1, Ordering::AcqRel);
+            let (tx, _rx) = mpsc::channel(1);
+            // `shell_pid` 0 keeps the Droid scrollback-clear filter from dropping the `ESC[3J`.
+            let _ = self.terminal.process_pty_bytes(
+                self.pane_id,
+                0,
+                self::terminal::CLEAR_SCREEN_AND_SCROLLBACK,
+                &tx,
+            );
+            self.content_seq.fetch_add(1, Ordering::Release);
+        }
+        drop(content_write_guard);
+        if plan == self::terminal::ClearScreenPlan::EraseNow {
+            self.compression.wake();
+            mark_detection_content_changed(&self.detection_content_seq);
+        }
+        if send_form_feed && plan != self::terminal::ClearScreenPlan::Deferred {
+            self.try_send_bytes(Bytes::from_static(b"\x0c"))?;
+        }
+        Ok(())
     }
 
     /// Resize if the dimensions actually changed.
@@ -3482,6 +3544,24 @@ impl PaneRuntime {
         self.compression.wake();
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_detection_content_seq(&self) -> u64 {
+        self.detection_content_seq.load(Ordering::Relaxed)
+    }
+
+    /// Fake the terminal's input mode: `Some(true)` cooked, `Some(false)` raw, `None` unknown.
+    #[cfg(test)]
+    pub(crate) fn test_set_input_canonical(&self, canonical: Option<bool>) {
+        if let PaneRuntimeIo::TestChannel {
+            input_canonical, ..
+        } = &self.io
+        {
+            if let Ok(mut mode) = input_canonical.lock() {
+                *mode = canonical;
+            }
+        }
+    }
+
     pub(crate) fn test_with_scrollback_bytes(
         cols: u16,
         rows: u16,
@@ -3516,6 +3596,7 @@ impl PaneRuntime {
                 io: PaneRuntimeIo::TestChannel {
                     sender: tx,
                     resize_tx,
+                    input_canonical: Arc::new(Mutex::new(None)),
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
@@ -3539,6 +3620,8 @@ impl PaneRuntime {
 
 #[cfg(test)]
 mod tests {
+    mod clear_screen;
+
     use super::*;
 
     #[tokio::test]
@@ -4368,6 +4451,7 @@ mod tests {
             io: PaneRuntimeIo::TestChannel {
                 sender: tx,
                 resize_tx,
+                input_canonical: Arc::new(Mutex::new(None)),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
@@ -4405,6 +4489,7 @@ mod tests {
             io: PaneRuntimeIo::TestChannel {
                 sender: tx,
                 resize_tx,
+                input_canonical: Arc::new(Mutex::new(None)),
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),

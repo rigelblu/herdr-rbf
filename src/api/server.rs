@@ -445,6 +445,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneResize(_) => "pane.resize",
         Method::PaneScroll(_) => "pane.scroll",
         Method::PaneEditScrollback(_) => "pane.edit_scrollback",
+        Method::PaneClearScreen(_) => "pane.clear_screen",
         Method::PaneSelectionRead(_) => "pane.selection.read",
         Method::PaneCopyMotion(_) => "pane.copy_motion",
         Method::PaneCopySearch(_) => "pane.copy_search",

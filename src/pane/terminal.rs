@@ -170,6 +170,9 @@ pub(crate) struct ProcessBytesResult {
     pub clipboard_writes: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
+    /// A ⌘K clear that waited for ground landed in this read with no Ctrl+L chosen at the key
+    /// press: the PTY reader sends one if the pane's terminal is in raw mode by now.
+    pub ctrl_l_if_raw_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -213,6 +216,25 @@ pub(crate) struct GhosttyPaneCore {
     decscusr_tracker: DecscusrTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
+    /// A ⌘K clear that arrived inside an unfinished escape sequence; `Some(send_form_feed)`.
+    pending_clear: Option<bool>,
+}
+
+/// Erases the visible screen, then scrollback: a complete erase below an OSC 133 prompt moves
+/// the visible rows into scrollback, and the scrollback erase must remove them too.
+pub(crate) const CLEAR_SCREEN_AND_SCROLLBACK: &[u8] = b"\x1b[2J\x1b[3J";
+
+/// What a ⌘K clear can do to a pane's terminal at the moment it arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClearScreenPlan {
+    /// The parser is at ground on the primary screen, or a second ⌘K arrived while a clear waits on
+    /// a stuck sequence: erase now. The erase's own ESC cancels any sequence (an anywhere transition).
+    EraseNow,
+    /// A full-screen program owns the alternate screen, or the terminal lock is poisoned: no erase.
+    NoErase,
+    /// The parser is inside a sequence: the next PTY read that reaches ground erases, and queues
+    /// any Ctrl+L with that read's terminal responses.
+    Deferred,
 }
 
 pub(crate) struct PaneTerminal {
@@ -256,6 +278,10 @@ impl PaneTerminal {
 
     pub fn scroll_reset(&self) {
         self.ghostty.scroll_reset();
+    }
+
+    pub fn plan_clear_screen(&self, send_form_feed: bool) -> ClearScreenPlan {
+        self.ghostty.plan_clear_screen(send_form_feed)
     }
 
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
@@ -1181,6 +1207,7 @@ impl GhosttyPaneTerminal {
                 decscusr_tracker: DecscusrTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
+                pending_clear: None,
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -1327,6 +1354,30 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    /// Decide how a ⌘K clear lands. The caller must hold the pane's content write lock, so no PTY
+    /// output is written between this plan and an `EraseNow` erase.
+    pub fn plan_clear_screen(&self, send_form_feed: bool) -> ClearScreenPlan {
+        let Ok(mut core) = self.core.lock() else {
+            error!("ghostty core lock poisoned before clear screen");
+            return ClearScreenPlan::NoErase;
+        };
+        if core
+            .terminal
+            .active_screen()
+            .is_ok_and(|screen| screen == crate::ghostty::ActiveScreen::Alternate)
+        {
+            return ClearScreenPlan::NoErase;
+        }
+        if core.terminal.at_ground() {
+            return ClearScreenPlan::EraseNow;
+        }
+        if core.pending_clear.take().is_some() {
+            return ClearScreenPlan::EraseNow;
+        }
+        core.pending_clear = Some(send_form_feed);
+        ClearScreenPlan::Deferred
+    }
+
     pub fn process_pty_bytes(
         &self,
         pane_id: PaneId,
@@ -1345,6 +1396,7 @@ impl GhosttyPaneTerminal {
                 clipboard_writes: Vec::new(),
                 reported_cwd: None,
                 terminal_responses: Vec::new(),
+                ctrl_l_if_raw_mode: false,
             };
         };
 
@@ -1417,6 +1469,26 @@ impl GhosttyPaneTerminal {
             c1_xtgettcap_responses,
             &mut terminal_responses,
         );
+        let mut ctrl_l_if_raw_mode = false;
+        if let Some(send_form_feed) = core.pending_clear {
+            let now_alternate = core
+                .terminal
+                .active_screen()
+                .is_ok_and(|screen| screen == crate::ghostty::ActiveScreen::Alternate);
+            if now_alternate || core.terminal.at_ground() {
+                if !now_alternate {
+                    core.terminal.write(CLEAR_SCREEN_AND_SCROLLBACK);
+                }
+                if send_form_feed {
+                    terminal_responses.push(Bytes::from_static(b"\x0c"));
+                } else {
+                    // The program was cooked at the key press, but the read that ended the
+                    // sequence can carry a shell prompt this erase just wiped.
+                    ctrl_l_if_raw_mode = true;
+                }
+                core.pending_clear = None;
+            }
+        }
         let terminal_bells = core.terminal.take_bell_count();
         let clipboard_writes = core.terminal.take_clipboard_writes();
         let reported_cwd = core
@@ -1479,6 +1551,7 @@ impl GhosttyPaneTerminal {
             clipboard_writes,
             reported_cwd,
             terminal_responses,
+            ctrl_l_if_raw_mode,
         }
     }
 

@@ -251,6 +251,7 @@ impl HeadlessServer {
             Method::AgentFocus(_)
                 | Method::CommandInvoke(_)
                 | Method::LayoutSetSplitRatio(_)
+                | Method::PaneClearScreen(_)
                 | Method::PaneClose(_)
                 | Method::PaneCopyMotion(_)
                 | Method::PaneCopySearch(_)

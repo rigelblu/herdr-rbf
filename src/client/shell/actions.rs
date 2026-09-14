@@ -1085,6 +1085,9 @@ impl ClientShellState {
             KeybindAction::EditScrollback => Some(Method::PaneEditScrollback(PaneTarget {
                 pane_id: focused_pane?,
             })),
+            KeybindAction::ClearScreen => Some(Method::PaneClearScreen(PaneTarget {
+                pane_id: focused_pane?,
+            })),
             KeybindAction::ResizePaneLeft
             | KeybindAction::ResizePaneDown
             | KeybindAction::ResizePaneUp

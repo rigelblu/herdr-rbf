@@ -930,6 +930,14 @@ impl Terminal {
         }
     }
 
+    /// Whether the VT parser is between sequences (no partial UTF-8, ESC, CSI, OSC, …), so an
+    /// out-of-band sequence can be written without splitting one the program is still sending.
+    /// An unreadable state counts as mid-sequence.
+    pub fn at_ground(&self) -> bool {
+        self.get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_VT_GROUND)
+            .unwrap_or(false)
+    }
+
     pub(crate) fn compression_activity(&self) -> Result<u64, Error> {
         let mut activity = 0;
         // SAFETY: self.raw is a live terminal handle and activity is a valid out pointer.

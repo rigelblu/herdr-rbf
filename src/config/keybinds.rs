@@ -372,6 +372,7 @@ pub struct Keybinds {
     pub toggle_sidebar_compact: ActionKeybinds,
     pub toggle_sidebar_hidden: ActionKeybinds,
     pub toggle_tab_bar: ActionKeybinds,
+    pub clear_screen: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -543,6 +544,7 @@ impl Config {
             toggle_sidebar_compact: empty_action!(),
             toggle_sidebar_hidden: empty_action!(),
             toggle_tab_bar: empty_action!(),
+            clear_screen: empty_action!(),
             custom_commands: Vec::new(),
         };
 
@@ -701,6 +703,7 @@ impl Config {
                 source
             );
             apply_action!(keybinds.toggle_tab_bar, toggle_tab_bar, source);
+            apply_action!(keybinds.clear_screen, clear_screen, source);
 
             if source == field_source!(indexed) {
                 append_legacy_indexed_bindings(

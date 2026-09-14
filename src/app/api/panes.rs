@@ -206,6 +206,20 @@ impl App {
         }
     }
 
+    /// Clear a pane like ⌘K in cmux (see `PaneRuntime::clear_screen` for the rules).
+    pub(super) fn handle_pane_clear_screen(&mut self, id: String, target: PaneTarget) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        if let Err(err) = runtime.clear_screen() {
+            return encode_error(id, "pane_send_failed", err.to_string());
+        }
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(crate) fn pane_selection_text(
         &self,
         params: &PaneSelectionReadParams,
@@ -2200,6 +2214,8 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod clear_screen;
+
     use super::*;
     use crate::{
         api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
