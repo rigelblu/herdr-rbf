@@ -577,10 +577,22 @@ impl TerminalRuntime {
     pub(crate) fn content_seq(&self) -> u64 {
         self.0.content_seq()
     }
+
+    pub(crate) fn clear_screen(&self) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.0.clear_screen()
+    }
 }
 
 #[cfg(test)]
 impl TerminalRuntime {
+    pub(crate) fn test_detection_content_seq(&self) -> u64 {
+        self.0.test_detection_content_seq()
+    }
+
+    pub(crate) fn test_set_input_canonical(&self, canonical: Option<bool>) {
+        self.0.test_set_input_canonical(canonical);
+    }
+
     pub(crate) fn test_contend_during_dirty_collection(
         &self,
         bytes: Vec<u8>,

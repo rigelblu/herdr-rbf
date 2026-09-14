@@ -1,5 +1,18 @@
 use std::path::{Path, PathBuf};
 
+/// Whether the terminal behind `fd` is in canonical (cooked) input mode. `Some(false)` is raw
+/// mode: the foreground program reads each key as it arrives. A PTY master reports its child's
+/// side (herdr-rbf `hrdr-4`).
+pub(crate) fn tty_fd_input_canonical(fd: std::os::fd::RawFd) -> Option<bool> {
+    // SAFETY: termios is plain integers and arrays, so all-zero bytes are a valid value.
+    let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: tcgetattr only writes into `attrs`, which is valid for writes; a bad fd returns -1.
+    if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+        return None;
+    }
+    Some(attrs.c_lflag & libc::ICANON != 0)
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     if status.signal().is_some() {
         super::ChildExitReason::Interrupted

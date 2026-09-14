@@ -456,6 +456,8 @@ pub struct KeysConfig {
     pub toggle_sidebar_hidden: BindingConfig,
     /// Toggle a hidden tab bar; hidden wins over ui.hide_tab_bar_when_single_tab. Default: "prefix+t"
     pub toggle_tab_bar: BindingConfig,
+    /// Clear the focused pane's screen and scrollback; full-screen programs only receive Ctrl+L. Default: "cmd+k"
+    pub clear_screen: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -593,6 +595,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_tab_bar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    clear_screen: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
     command: Option<Vec<CommandKeybindConfig>>,
@@ -683,6 +687,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_sidebar_compact);
         apply_field!(toggle_sidebar_hidden);
         apply_field!(toggle_tab_bar);
+        apply_field!(clear_screen);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -790,6 +795,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_sidebar_compact, keybinds.toggle_sidebar_compact);
         copy_effective_action_field!(toggle_sidebar_hidden, keybinds.toggle_sidebar_hidden);
         copy_effective_action_field!(toggle_tab_bar, keybinds.toggle_tab_bar);
+        copy_effective_action_field!(clear_screen, keybinds.clear_screen);
         copy_user_field!(indexed);
 
         profile
@@ -1161,6 +1167,7 @@ impl Default for KeysConfig {
             toggle_sidebar_compact: BindingConfig::empty(),
             toggle_sidebar_hidden: BindingConfig::one("prefix+shift+b"),
             toggle_tab_bar: BindingConfig::one("prefix+t"),
+            clear_screen: BindingConfig::one("cmd+k"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),

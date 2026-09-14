@@ -848,6 +848,12 @@
           "description": "Toggle a hidden tab bar; hidden wins over ui.hide_tab_bar_when_single_tab."
         },
         {
+          "key": "keys.clear_screen",
+          "type": "keybinding",
+          "default": "\"cmd+k\"",
+          "description": "Clear the focused pane's screen and scrollback; full-screen programs only receive Ctrl+L."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",

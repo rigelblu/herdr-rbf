@@ -1104,6 +1104,9 @@ impl App {
             Method::PaneEditScrollback(target) => {
                 return self.handle_pane_edit_scrollback(request.id, target);
             }
+            Method::PaneClearScreen(target) => {
+                return self.handle_pane_clear_screen(request.id, target);
+            }
             Method::PaneSelectionRead(params) => {
                 return self.handle_pane_selection_read(request.id, params);
             }

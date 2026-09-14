@@ -18,6 +18,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "integration.install",
     "integration.list",
     "layout.set_split_ratio",
+    "pane.clear_screen",
     "pane.close",
     "pane.copy_motion",
     "pane.copy_search",

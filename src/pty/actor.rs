@@ -17,6 +17,11 @@ mod windows {
 
     pub(crate) struct PtyReadResult {
         pub terminal_responses: Vec<Bytes>,
+        /// Unix-only in effect (herdr-rbf `hrdr-4`): modes aren't readable here, so ⌘K always
+        /// chooses Ctrl+L up front and this is never set.
+        #[allow(dead_code)]
+        // written by the shared `on_read` closures in `pane.rs`, never read here
+        pub ctrl_l_if_raw_mode: bool,
     }
 
     type ReadCallback = Box<dyn FnMut(&[u8]) -> PtyReadResult + Send + 'static>;
