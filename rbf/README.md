@@ -27,6 +27,13 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - `prefix+n`, `prefix+p`, and `prefix+1..9` still switch tabs while it's hidden
 - Rebind it with `keys.toggle_tab_bar` under `[keys]`, e.g. `toggle_tab_bar = "prefix+y"`. `prefix+?` lists it under the sidebar keys
 
+## 🟠⋯ Clear the screen
+- ⌘K clears the focused pane's screen and scrollback, the same as in cmux. A shell gets a fresh prompt
+- Full-screen programs like vim or an agent's TUI keep their screen and only get Ctrl+L, which usually redraws it
+- If the pane is mid-way through printing an escape sequence, the clear waits for it to finish. Press ⌘K again to clear at once
+- Turn it off with `clear_screen = ""` under `[keys]` in `~/.config/herdr/config.toml`, or rebind `keys.clear_screen`. `prefix+?` lists it
+- If ⌘K does nothing, your terminal app is taking the key first. cmux passes it through. Ghostty on its own, kitty on macOS, iTerm2, and Terminal.app may bind ⌘K to their own clear: unbind it there, or rebind `keys.clear_screen`
+
 # 🔵⋯ Versions
 - This flavour's release version lives in `rbf/RBF_VERSION`, its history in `rbf/CHANGELOG.md`
 - Upstream's own version file tracks upstream, not this flavour
