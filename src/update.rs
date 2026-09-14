@@ -29,6 +29,12 @@ const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
 const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
+// herdr-rbf: fork builds install through rbf/scripts/install-rbf.sh, never upstream's release
+const RBF_BUILD: bool = true;
+const RBF_INSTALL_COMMAND: &str = "rbf/scripts/install-rbf.sh";
+const RBF_SELF_UPDATE_REFUSAL: &str = "self-update is disabled for herdr-rbf builds; run rbf/scripts/install-rbf.sh from your herdr-rbf checkout";
+const RBF_CHANNEL_UPDATE_GUIDANCE: &str =
+    "Use `rbf/scripts/install-rbf.sh` from your herdr-rbf checkout to install herdr-rbf builds.";
 const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
@@ -1929,7 +1935,9 @@ fn print_running_session_update_outcomes(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn update_install_command() -> &'static str {
-    if is_homebrew_managed_install() {
+    if RBF_BUILD {
+        RBF_INSTALL_COMMAND
+    } else if is_homebrew_managed_install() {
         HOMEBREW_UPDATE_COMMAND
     } else if is_mise_managed_install() {
         MISE_UPDATE_COMMAND
@@ -1942,6 +1950,10 @@ pub(crate) fn update_install_command() -> &'static str {
 
 pub(crate) fn update_install_instruction(install_command: &str) -> String {
     match install_command {
+        RBF_INSTALL_COMMAND => {
+            "run `rbf/scripts/install-rbf.sh` from your herdr-rbf checkout; it hands running sessions to the new build"
+                .to_string()
+        }
         HERDR_UPDATE_COMMAND => {
             "detach, run `herdr update`, then run Herdr again to reconnect".to_string()
         }
@@ -1993,7 +2005,9 @@ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static
 
 pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
 {
-    if is_homebrew_managed_install() {
+    if RBF_BUILD {
+        Some(RBF_CHANNEL_UPDATE_GUIDANCE)
+    } else if is_homebrew_managed_install() {
         Some("Use `brew update && brew upgrade herdr` to update Homebrew installs.")
     } else if is_mise_managed_install() {
         Some("Use `mise upgrade herdr` to update mise installs.")
@@ -2181,6 +2195,10 @@ fn preserve_preview_channel_for_install(
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+    if RBF_BUILD {
+        return Err(RBF_SELF_UPDATE_REFUSAL.into());
+    }
+
     let channel = UpdateChannel::configured();
 
     if is_homebrew_managed_install() {
@@ -2790,6 +2808,10 @@ mod channel_tests {
         fs::remove_dir(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "update_rbf_tests.rs"]
+mod update_rbf_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

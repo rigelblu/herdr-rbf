@@ -22,9 +22,17 @@ pub(super) struct ClientChromePreferences {
     pub(super) sidebar_section_split: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_collapsed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::sidebar_shape::lenient_option"
+    )]
     pub(super) sidebar_collapsed_mode: Option<crate::config::SidebarCollapsedModeConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::sidebar_shape::lenient_option"
+    )]
     pub(super) sidebar_hide_restore: Option<super::sidebar_shape::SidebarHideRestore>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) tab_bar_hidden: Option<bool>,

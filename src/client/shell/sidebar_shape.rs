@@ -94,7 +94,7 @@ pub(super) fn next(
         },
         SidebarShapeToggle::Compact => match effective {
             Some(SidebarCollapsedModeConfig::Compact) => SidebarShapeState::EXPANDED,
-            _ => SidebarShapeState::COMPACT,
+            Some(SidebarCollapsedModeConfig::Hidden) | None => SidebarShapeState::COMPACT,
         },
         SidebarShapeToggle::Hidden => match effective {
             Some(SidebarCollapsedModeConfig::Hidden) => match state.hide_restore {
@@ -105,12 +105,35 @@ pub(super) fn next(
                 collapsed: true,
                 mode_override: Some(SidebarCollapsedModeConfig::Hidden),
                 hide_restore: Some(match previous {
-                    Some(_) => SidebarHideRestore::Compact,
+                    // `Hidden` is matched by the arm above; listing it keeps this match
+                    // exhaustive over the variants, so a new one fails to compile here.
+                    Some(
+                        SidebarCollapsedModeConfig::Compact | SidebarCollapsedModeConfig::Hidden,
+                    ) => SidebarHideRestore::Compact,
                     None => SidebarHideRestore::Expanded,
                 }),
             },
         },
     }
+}
+
+/// Reads an optional JSON preferences field, turning a value this build doesn't know (a
+/// hand edit, or a file from a newer build) into `None` instead of failing the whole
+/// file, which would also drop every other saved preference. The ignored value is
+/// logged, and the next preferences save writes `None` over it.
+pub(super) fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match T::deserialize(&value) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            tracing::warn!(%value, %err, "ignoring unrecognized sidebar preference value");
+            None
+        }
+    }))
 }
 
 impl ClientShellState {
@@ -287,10 +310,37 @@ mod tests {
     }
 
     fn state_with_preferences(path: &std::path::Path) -> ClientShellState {
+        state_with_config_and_preferences(&crate::config::Config::default(), path)
+    }
+
+    fn state_with_config_and_preferences(
+        config: &crate::config::Config,
+        path: &std::path::Path,
+    ) -> ClientShellState {
         ClientShellState::new(
-            super::super::ClientShellConfig::from_config(&crate::config::Config::default())
+            super::super::ClientShellConfig::from_config(config)
                 .with_preferences_path(path.to_path_buf()),
         )
+    }
+
+    #[test]
+    fn toggle_sidebar_hidden_default_yields_silently_to_a_user_binding() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        use crate::input::{resolve_prefix_binding, KeybindAction, KeybindMatch, TerminalKey};
+
+        let config: crate::config::Config =
+            toml::from_str("[keys]\nnew_tab = \"prefix+shift+b\"\n").expect("user config");
+        let (live, diagnostics) = config
+            .live_keybinds_with_diagnostics()
+            .expect("user keybinds");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let shift_b = TerminalKey::new(KeyCode::Char('B'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            resolve_prefix_binding(&live.keybinds, &shift_b),
+            Some(KeybindMatch::Action(KeybindAction::NewTab))
+        ));
+        assert!(live.keybinds.toggle_sidebar_hidden.bindings.is_empty());
     }
 
     #[test]
@@ -389,11 +439,42 @@ mod tests {
         assert_eq!(state.sidebar_hide_restore, None);
         assert_eq!(state.sidebar_collapsed_mode_override, None);
 
+        // Start collapsed so the override would matter: it applies only beside a saved
+        // manual collapse, so the strip follows the global compact mode.
         std::fs::write(&path, r#"{"sidebar_collapsed_mode":"hidden"}"#)
             .expect("override without a manual collapse");
-        let state = state_with_preferences(&path);
+        let mut start_collapsed = crate::config::Config::default();
+        start_collapsed.ui.sidebar_start_collapsed = true;
+        let state = state_with_config_and_preferences(&start_collapsed, &path);
         assert!(!state.sidebar_collapsed_manual);
         assert_eq!(state.sidebar_collapsed_mode_override, None);
+        assert_eq!(sidebar_width(&state), 4);
+        std::fs::remove_file(path).expect("remove preferences");
+    }
+
+    #[test]
+    fn sidebar_shape_preferences_unknown_values_keep_the_rest_of_the_file() {
+        let path = preferences_path("unknown-values");
+        for (file, mode, restore) in [
+            (
+                r#"{"sidebar_width":31,"sidebar_collapsed":true,"sidebar_collapsed_mode":"hidden","sidebar_hide_restore":"icons","tab_bar_hidden":true}"#,
+                Some(Hidden),
+                None,
+            ),
+            (
+                r#"{"sidebar_width":31,"sidebar_collapsed":true,"sidebar_collapsed_mode":"icons","sidebar_hide_restore":"compact","tab_bar_hidden":true}"#,
+                None,
+                Some(SidebarHideRestore::Compact),
+            ),
+        ] {
+            std::fs::write(&path, file).expect("preferences with an unknown value");
+            let preferences = super::super::preferences::load(&path).expect(file);
+            assert_eq!(preferences.sidebar_width, Some(31), "{file}");
+            assert_eq!(preferences.sidebar_collapsed, Some(true), "{file}");
+            assert_eq!(preferences.tab_bar_hidden, Some(true), "{file}");
+            assert_eq!(preferences.sidebar_collapsed_mode, mode, "{file}");
+            assert_eq!(preferences.sidebar_hide_restore, restore, "{file}");
+        }
         std::fs::remove_file(path).expect("remove preferences");
     }
 
@@ -448,14 +529,6 @@ mod tests {
         assert_eq!(sidebar_width(&state), 0);
         press(&mut state, ToggleSidebarHidden);
         assert_eq!(sidebar_width(&state), 26);
-    }
-
-    #[test]
-    fn profile_ignores_unknown_keys() {
-        assert!(crate::config::keybindings_from_profile_toml(
-            "[keys]\nprefix = \"ctrl+b\"\ntoggle_sidebar_future = \"prefix+y\"\n"
-        )
-        .is_ok());
     }
 
     #[test]
