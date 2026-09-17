@@ -1803,13 +1803,32 @@ impl ClientShellState {
         }
     }
 
-    pub(crate) fn show_copy_feedback(&mut self, now: std::time::Instant) -> bool {
+    pub(crate) fn show_copy_feedback(
+        &mut self,
+        now: std::time::Instant,
+        joined_breaks: u32,
+        decided_by: crate::api::schema::PaneSelectionJoinDecision,
+    ) -> bool {
         if !self.config.clipboard_toast_enabled {
             return false;
         }
-        self.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: "copied to clipboard".to_owned(),
-        });
+        let message = match (joined_breaks, decided_by) {
+            (_, crate::api::schema::PaneSelectionJoinDecision::Unavailable) => {
+                "copied as shown · agent text unavailable".to_owned()
+            }
+            (1, crate::api::schema::PaneSelectionJoinDecision::SavedReply)
+            | (1, crate::api::schema::PaneSelectionJoinDecision::ScreenRule) => {
+                "copied · rejoined 1 wrapped line".to_owned()
+            }
+            (count, crate::api::schema::PaneSelectionJoinDecision::SavedReply)
+            | (count, crate::api::schema::PaneSelectionJoinDecision::ScreenRule)
+                if count > 1 =>
+            {
+                format!("copied · rejoined {count} wrapped lines")
+            }
+            _ => "copied to clipboard".to_owned(),
+        };
+        self.copy_feedback = Some(crate::app::state::CopyFeedback { message });
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true
     }

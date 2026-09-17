@@ -493,6 +493,14 @@ impl ClientShellState {
             .is_none_or(|methods| methods.contains(crate::api::api_method_name(method)))
     }
 
+    pub(super) fn endpoint_advertises_method(&self, method: &str) -> bool {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| endpoint.methods.as_ref())
+            .is_some_and(|methods| methods.contains(method))
+    }
+
     pub(super) fn focused_tab_count(&self) -> usize {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return 0;

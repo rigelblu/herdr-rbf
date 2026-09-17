@@ -1145,6 +1145,12 @@
           ]
         },
         {
+          "key": "ui.copy.join_agent_wraps",
+          "type": "boolean",
+          "default": "true",
+          "description": "Rejoin agent-authored wrap breaks when the original saved reply is available. Falls back to copying the drawn rows when reconstruction is unavailable."
+        },
+        {
           "key": "ui.toast.clipboard.enabled",
           "type": "boolean",
           "default": "true",

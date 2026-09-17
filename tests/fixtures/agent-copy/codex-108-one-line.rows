@@ -1,0 +1,4 @@
+• echo "Testing command wrapping" && echo "System: $(uname -a)" && echo "User: $(whoami)" && echo "Path:
+$(pwd)" && echo "Date: $(date)" && git log --oneline -5 2>/dev/null || echo "Not in git" && git status
+--short 2>/dev/null | head -10 || true && echo "---" && ls -lh rbf/ 2>/dev/null || echo "rbf/ not found" &&
+echo "---" && echo "✓ Command executed successfully"

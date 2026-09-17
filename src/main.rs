@@ -11,6 +11,7 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "recursion detected. base case not found. aborting.",
 ];
 
+mod agent;
 mod agent_resume;
 mod agent_view_eval;
 mod api;
@@ -362,6 +363,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Blank rows between space entries. Set to 1 to restore the previous spacing.
 # row_gap = 0
 # rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+
+[ui.copy]
+# Rejoin wrap breaks inside Codex replies using Codex's saved text.
+# Set false to copy rows exactly as drawn.
+# join_agent_wraps = true
 
 # Background notification popup delivery
 [ui.toast]
@@ -813,6 +819,16 @@ mod tests {
         let sidebar = DEFAULT_CONFIG.find("# [ui.sidebar.agents]").unwrap();
 
         assert!(accent < sidebar);
+    }
+
+    #[test]
+    fn default_config_lists_copy_table_after_flat_ui_keys() {
+        let host_cursor = DEFAULT_CONFIG.find("# host_cursor = \"auto\"").unwrap();
+        let copy = DEFAULT_CONFIG.find("[ui.copy]").unwrap();
+        let toast = DEFAULT_CONFIG.find("[ui.toast]").unwrap();
+
+        assert!(host_cursor < copy);
+        assert!(copy < toast);
     }
 
     #[test]

@@ -1,0 +1,5 @@
+{
+  "pane_width": 108,
+  "reply": "```bash\necho \"one: this first line is long on purpose so it wraps in the pane, $(uname -a) $(whoami) $(pwd) $(date)\"\necho \"two\"\nls -lh rbf/ 2>/dev/null || echo \"rbf/ not found\"\n```",
+  "expected": "echo \"one: this first line is long on purpose so it wraps in the pane, $(uname -a) $(whoami) $(pwd) $(date)\"\necho \"two\"\nls -lh rbf/ 2>/dev/null || echo \"rbf/ not found\""
+}

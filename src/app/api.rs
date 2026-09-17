@@ -1133,6 +1133,9 @@ impl App {
             Method::PaneSelectionRead(params) => {
                 return self.handle_pane_selection_read(request.id, params);
             }
+            Method::PaneSelectionReadJoined(params) => {
+                return self.handle_pane_selection_read_joined(request.id, params);
+            }
             Method::PaneCopyMotion(params) => {
                 return self.handle_pane_copy_motion(request.id, params);
             }

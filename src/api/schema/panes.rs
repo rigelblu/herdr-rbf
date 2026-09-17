@@ -265,6 +265,15 @@ pub struct PaneSelectionReadParams {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum PaneSelectionJoinDecision {
+    SavedReply,
+    ScreenRule,
+    Unavailable,
+    NotJoined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum PaneCopyMotion {
     LineEnd,
     FirstNonBlank,
