@@ -274,6 +274,12 @@ pub enum ResponseResult {
         context: PluginInvocationContext,
         log: PluginCommandLogInfo,
     },
+    PaneSelectionJoined {
+        pane_id: String,
+        text: String,
+        joined_breaks: u32,
+        decided_by: super::panes::PaneSelectionJoinDecision,
+    },
     PaneLinkResolved {
         regions: Vec<super::panes::PaneLinkRegion>,
     },
