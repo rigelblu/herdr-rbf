@@ -34,6 +34,14 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - Turn it off with `clear_screen = ""` under `[keys]` in `~/.config/herdr/config.toml`, or rebind `keys.clear_screen`. `prefix+?` lists it
 - If ⌘K does nothing, your terminal app is taking the key first. cmux passes it through. Ghostty on its own, kitty on macOS, iTerm2, and Terminal.app may bind ⌘K to their own clear: unbind it there, or rebind `keys.clear_screen`
 
+## 🟠⋯ Agent names on attached tabs
+- A window running `herdr terminal attach` shows its pane's title, status symbol included (`✳ my session`). cmux names the tab from it, so a tab showing a herdr-held agent reads the same as the agent running directly in cmux
+- The name follows every change: renames, and the symbol while the agent works
+- A pane with no title sends nothing, and the tab keeps the name its shell gave it. When a program clears its title, the tab keeps the last one
+- Detaching doesn't bring back the tab's old name. Your shell's prompt renames it
+- Turn it off with `window_title = ""` under `[ui]` in `~/.config/herdr/config.toml`. That also stops herdr setting the full view's window title
+- Pane titles now survive an install (a live handoff), so `herdr pane list` keeps every name, and a tab that attaches again is named at once
+
 # 🔵⋯ Install
 ## 🟠⋯ Install your fork build as your daily `herdr`
 - From the herdr-rbf checkout, run `rbf/scripts/install-rbf.sh --dry-run`, read the plan, then run `rbf/scripts/install-rbf.sh`

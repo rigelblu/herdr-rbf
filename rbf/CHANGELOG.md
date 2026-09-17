@@ -9,6 +9,18 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.5.0 (2026-09-17)
+## 🟠⋯ Added for End Users
+- 2026-09-17 - feat (user need) | a cmux tab showing an agent through `herdr terminal attach` now shows the agent's own title, status symbol included, and follows its renames, so you can find an agent by its tab name
+
+## 🟠⋯ Added for Technical Users
+- 2026-09-17 - feat (technical) | `herdr terminal attach` writes its pane's title to the terminal it runs in and keeps it current; a pane with no title sends nothing. `ui.window_title = ""` turns this off too, along with herdr's own window titles
+
+## 🟠⋯ Fixed for End Users
+- 2026-09-17 - fix (user need) | `herdr pane list` no longer loses pane titles after an install, so the `herdr-agent` picker keeps its names and a tab that attaches again is named at once
+
+---
+
 # 🔵⋯ v0.4.0 (2026-09-14)
 ## 🟠⋯ Added for End Users
 - 2026-09-14 - feat (user need) | `rbf/scripts/install-rbf.sh` builds the checked-out fork and installs it as your daily `herdr`, handing every running session to the new build without stopping its panes. `--dry-run` previews and `--rollback` undoes
