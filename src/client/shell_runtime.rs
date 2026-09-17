@@ -36,7 +36,26 @@ pub(super) fn dispatch_client_shell_actions(
             shell::ClientShellAction::ClipboardWrite(bytes) => {
                 if crate::selection::write_osc52_bytes(&bytes) {
                     if let Some(shell) = shell.as_deref_mut() {
-                        repaint |= shell.show_copy_feedback(std::time::Instant::now());
+                        repaint |= shell.show_copy_feedback(
+                            std::time::Instant::now(),
+                            0,
+                            crate::api::schema::PaneSelectionJoinDecision::NotJoined,
+                        );
+                    }
+                }
+            }
+            shell::ClientShellAction::ClipboardWriteJoined {
+                bytes,
+                joined_breaks,
+                decided_by,
+            } => {
+                if crate::selection::write_osc52_bytes(&bytes) {
+                    if let Some(shell) = shell.as_deref_mut() {
+                        repaint |= shell.show_copy_feedback(
+                            std::time::Instant::now(),
+                            joined_breaks,
+                            decided_by,
+                        );
                     }
                 }
             }

@@ -1,0 +1,3 @@
+• One-off command test; I’m skipping session pickup and the product-dimensions pass because this only hands
+  you a command and makes no project changes. I’m using the command-running guidance to preserve your exact
+  shell expression.

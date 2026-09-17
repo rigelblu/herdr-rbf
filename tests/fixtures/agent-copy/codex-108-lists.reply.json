@@ -1,0 +1,5 @@
+{
+  "pane_width": 108,
+  "reply": "- first item that wraps here\n1. numbered item that wraps here too",
+  "expected": "- first item that wraps here\n1. numbered item that wraps here too"
+}

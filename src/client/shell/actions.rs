@@ -300,24 +300,24 @@ impl ClientShellState {
             // between the displayed frame and this request must not reject the copy.
             .filter(|_| !live);
         let (anchor, cursor) = selection.ordered_cells();
-        self.push_endpoint_method_with_kind(
-            crate::api::schema::Method::PaneSelectionRead(
-                crate::api::schema::PaneSelectionReadParams {
-                    pane_id,
-                    anchor: crate::api::schema::PaneTextPoint {
-                        row: anchor.0,
-                        col: anchor.1,
-                    },
-                    cursor: crate::api::schema::PaneTextPoint {
-                        row: cursor.0,
-                        col: cursor.1,
-                    },
-                    content_revision,
-                },
-            ),
-            PendingEndpointKind::SelectionCopy,
-            outcome,
-        );
+        let params = crate::api::schema::PaneSelectionReadParams {
+            pane_id,
+            anchor: crate::api::schema::PaneTextPoint {
+                row: anchor.0,
+                col: anchor.1,
+            },
+            cursor: crate::api::schema::PaneTextPoint {
+                row: cursor.0,
+                col: cursor.1,
+            },
+            content_revision,
+        };
+        let method = if self.endpoint_advertises_method("pane.selection.read_joined") {
+            crate::api::schema::Method::PaneSelectionReadJoined(params)
+        } else {
+            crate::api::schema::Method::PaneSelectionRead(params)
+        };
+        self.push_endpoint_method_with_kind(method, PendingEndpointKind::SelectionCopy, outcome);
     }
 
     pub(super) fn push_endpoint_method(
@@ -661,7 +661,23 @@ impl ClientShellState {
                             vec![ClientShellAction::ClipboardWrite(text.into_bytes())],
                         )
                     }
+                    Ok(crate::api::schema::ResponseResult::PaneSelectionJoined {
+                        text,
+                        joined_breaks,
+                        decided_by,
+                        ..
+                    }) if !text.is_empty() => (
+                        false,
+                        vec![ClientShellAction::ClipboardWriteJoined {
+                            bytes: text.into_bytes(),
+                            joined_breaks,
+                            decided_by,
+                        }],
+                    ),
                     Ok(crate::api::schema::ResponseResult::PaneSelection { .. }) => {
+                        (false, Vec::new())
+                    }
+                    Ok(crate::api::schema::ResponseResult::PaneSelectionJoined { .. }) => {
                         (false, Vec::new())
                     }
                     Ok(_) => {

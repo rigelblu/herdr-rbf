@@ -1465,3 +1465,32 @@ fn read_choices_cover_every_api_value() {
     crate::cli::projection::assert_choices_cover_api_enum(READ_SOURCES);
     crate::cli::projection::assert_choices_cover_api_enum(READ_FORMATS);
 }
+
+#[test]
+fn pane_selection_read_joined_round_trips() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id": "copy", "method": "pane.selection.read_joined",
+        "params": {
+            "pane_id": "pane-1",
+            "anchor": {"row": 2, "col": 3},
+            "cursor": {"row": 5, "col": 8}
+        }
+    }))
+    .unwrap();
+    assert!(matches!(request.method, Method::PaneSelectionReadJoined(_)));
+
+    let result = ResponseResult::PaneSelectionJoined {
+        pane_id: "pane-1".into(),
+        text: "echo exact".into(),
+        joined_breaks: 2,
+        decided_by: PaneSelectionJoinDecision::SavedReply,
+    };
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["type"], "pane_selection_joined");
+    assert_eq!(json["joined_breaks"], 2);
+    assert_eq!(json["decided_by"], "saved_reply");
+    assert_eq!(
+        serde_json::from_value::<ResponseResult>(json).unwrap(),
+        result
+    );
+}
