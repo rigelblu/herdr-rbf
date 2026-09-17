@@ -216,6 +216,13 @@ pub struct ClipboardToastConfig {
     pub position: ToastClipboardPosition,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct CopyConfig {
+    /// Rejoin agent-authored wrap breaks when the original reply is available. Default: true.
+    pub join_agent_wraps: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum NewTerminalCwdConfig {
     #[default]
@@ -940,6 +947,8 @@ pub struct UiConfig {
     pub mouse_capture: bool,
     /// Copy text selected with the mouse. Default: true.
     pub copy_on_select: bool,
+    /// Clipboard text reconstruction settings.
+    pub copy: CopyConfig,
     /// Host cursor policy. Default: auto.
     pub host_cursor: HostCursorModeConfig,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -1194,6 +1203,7 @@ impl Default for UiConfig {
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             copy_on_select: true,
+            copy: CopyConfig::default(),
             host_cursor: HostCursorModeConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
@@ -1258,6 +1268,14 @@ impl Default for ClipboardToastConfig {
         Self {
             enabled: true,
             position: ToastClipboardPosition::BottomCenter,
+        }
+    }
+}
+
+impl Default for CopyConfig {
+    fn default() -> Self {
+        Self {
+            join_agent_wraps: true,
         }
     }
 }
@@ -1892,6 +1910,20 @@ position = "top-center"
             config.ui.toast.clipboard.position,
             ToastClipboardPosition::BottomCenter
         );
+    }
+
+    #[test]
+    fn copy_join_agent_wraps_defaults_on_and_parses_off() {
+        assert!(Config::default().ui.copy.join_agent_wraps);
+
+        let config: Config = toml::from_str(
+            r#"
+[ui.copy]
+join_agent_wraps = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.copy.join_agent_wraps);
     }
 
     #[test]

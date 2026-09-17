@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::widgets::panel_contrast_fg;
 use crate::{
@@ -22,7 +23,9 @@ pub(crate) fn copy_feedback_rect(
         return Rect::default();
     }
 
-    let content_width = feedback.message.len() as u16 + 4;
+    let content_width = u16::try_from(feedback.message.width())
+        .unwrap_or(u16::MAX)
+        .saturating_add(4);
     let width = content_width.min(area.width);
     let height = 3u16.min(area.height);
     let x = match position {
@@ -145,5 +148,17 @@ mod tests {
             bottom.x,
             area.x + area.width.saturating_sub(bottom.width) / 2
         );
+    }
+
+    #[test]
+    fn copy_feedback_rect_uses_display_columns_for_middle_dot_message() {
+        let area = Rect::new(0, 0, 100, 10);
+        let feedback = CopyFeedback {
+            message: "copied · rejoined 3 wrapped lines".to_owned(),
+        };
+
+        let rect = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::BottomCenter);
+
+        assert_eq!(rect.width, 37);
     }
 }

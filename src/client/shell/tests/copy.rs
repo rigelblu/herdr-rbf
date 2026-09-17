@@ -132,6 +132,10 @@ fn client_selection_uses_host_background_and_repaints_when_it_changes() {
 #[test]
 fn client_mouse_selection_highlights_and_copies_through_endpoint_extraction() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_methods(Some(vec![
+        "pane.focus".into(),
+        "pane.selection.read".into(),
+    ]));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("composed frame");
@@ -221,7 +225,11 @@ fn client_mouse_selection_highlights_and_copies_through_endpoint_extraction() {
 fn clipboard_feedback_is_client_local_and_respects_config() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let now = std::time::Instant::now();
-    assert!(state.show_copy_feedback(now));
+    assert!(state.show_copy_feedback(
+        now,
+        0,
+        crate::api::schema::PaneSelectionJoinDecision::NotJoined
+    ));
     assert_eq!(
         state
             .copy_feedback
@@ -237,9 +245,117 @@ fn clipboard_feedback_is_client_local_and_respects_config() {
     state.config.clipboard_toast_enabled = false;
     state.copy_feedback = None;
     state.copy_feedback_deadline = None;
-    assert!(!state.show_copy_feedback(now));
+    assert!(!state.show_copy_feedback(
+        now,
+        0,
+        crate::api::schema::PaneSelectionJoinDecision::NotJoined
+    ));
     assert!(state.copy_feedback.is_none());
     assert!(state.copy_feedback_deadline.is_none());
+}
+
+#[test]
+fn client_mouse_selection_requests_joined_copy_only_when_advertised() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_methods(Some(vec![
+        "pane.focus".into(),
+        "pane.selection.read_joined".into(),
+    ]));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("composed frame");
+    let pane = state.hits.panes[0].clone();
+
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), pane.inner_rect.x),
+        (
+            MouseEventKind::Drag(MouseButton::Left),
+            pane.inner_rect.x + 2,
+        ),
+    ] {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row: pane.inner_rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    }
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: pane.inner_rect.x + 2,
+            row: pane.inner_rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    let [ClientShellAction::Endpoint { request, .. }] = &release.actions[..] else {
+        panic!("selection release should request endpoint extraction");
+    };
+    let request_id = request.id.clone();
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::PaneSelectionReadJoined(params)
+            if params.pane_id == "pane_1"
+    ));
+
+    let (repaint, actions) = state.handle_endpoint_result(
+        "boot-1",
+        &request_id,
+        Ok(crate::api::schema::ResponseResult::PaneSelectionJoined {
+            pane_id: "pane_1".into(),
+            text: "joined".into(),
+            joined_breaks: 1,
+            decided_by: crate::api::schema::PaneSelectionJoinDecision::SavedReply,
+        }),
+    );
+    assert!(repaint);
+    assert!(matches!(
+        &actions[..],
+        [ClientShellAction::ClipboardWrite(bytes)] if bytes == b"joined"
+    ));
+    assert_eq!(
+        state
+            .copy_feedback
+            .as_ref()
+            .map(|feedback| feedback.message.as_str()),
+        Some("copied · rejoined 1 wrapped line")
+    );
+}
+
+#[test]
+fn copy_feedback_counts() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let now = std::time::Instant::now();
+    for (joined_breaks, decided_by, expected) in [
+        (
+            0,
+            crate::api::schema::PaneSelectionJoinDecision::NotJoined,
+            "copied to clipboard",
+        ),
+        (
+            1,
+            crate::api::schema::PaneSelectionJoinDecision::SavedReply,
+            "copied · rejoined 1 wrapped line",
+        ),
+        (
+            3,
+            crate::api::schema::PaneSelectionJoinDecision::SavedReply,
+            "copied · rejoined 3 wrapped lines",
+        ),
+        (
+            0,
+            crate::api::schema::PaneSelectionJoinDecision::Unavailable,
+            "copied as shown · agent text unavailable",
+        ),
+    ] {
+        assert!(state.show_copy_feedback(now, joined_breaks, decided_by));
+        assert_eq!(
+            state
+                .copy_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some(expected)
+        );
+    }
 }
 
 #[test]

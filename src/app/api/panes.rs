@@ -11,10 +11,10 @@ use crate::api::schema::{
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneScrollParams, PaneSelectionJoinDecision, PaneSelectionReadParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
+    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -278,6 +278,85 @@ impl App {
             ),
             Err((code, message)) => encode_error(id, code, message),
         }
+    }
+
+    pub(super) fn handle_pane_selection_read_joined(
+        &mut self,
+        id: String,
+        params: PaneSelectionReadParams,
+    ) -> String {
+        let drawn = match self.pane_selection_text(&params) {
+            Ok(text) => text,
+            Err((code, message)) => return encode_error(id, code, message),
+        };
+        let joined = if !self.state.join_agent_wraps {
+            crate::agent::reply_join::not_joined(&drawn)
+        } else {
+            match self.codex_session_id_for_pane(&params.pane_id) {
+                None => crate::agent::reply_join::not_joined(&drawn),
+                Some(None) => crate::agent::reply_join::unavailable(&drawn),
+                Some(Some(session_id)) => crate::agent::codex_reply::recent_messages(
+                    &session_id,
+                    crate::agent::codex_reply::SESSION_LOOKUP_BUDGET,
+                )
+                .map_or_else(
+                    || crate::agent::reply_join::unavailable(&drawn),
+                    |replies| crate::agent::reply_join::join_codex_replies(&drawn, &replies),
+                ),
+            }
+        };
+        let decided_by = match joined.decided_by {
+            crate::agent::reply_join::JoinDecision::SavedReply => {
+                PaneSelectionJoinDecision::SavedReply
+            }
+            crate::agent::reply_join::JoinDecision::Unavailable => {
+                PaneSelectionJoinDecision::Unavailable
+            }
+            crate::agent::reply_join::JoinDecision::NotJoined => {
+                PaneSelectionJoinDecision::NotJoined
+            }
+        };
+        tracing::debug!(
+            pane_id = %params.pane_id,
+            joined_breaks = joined.breaks_removed,
+            ?decided_by,
+            "selection copy join decided"
+        );
+        encode_success(
+            id,
+            ResponseResult::PaneSelectionJoined {
+                pane_id: params.pane_id,
+                text: joined.text,
+                joined_breaks: u32::try_from(joined.breaks_removed).unwrap_or(u32::MAX),
+                decided_by,
+            },
+        )
+    }
+
+    fn codex_session_id_for_pane(&self, public_pane_id: &str) -> Option<Option<String>> {
+        let (ws_idx, pane_id) = self.parse_pane_id(public_pane_id)?;
+        let terminal_id = self.state.workspaces.get(ws_idx)?.terminal_id(pane_id)?;
+        let terminal = self.state.terminals.get(terminal_id)?;
+        if terminal.effective_agent_label() != Some("codex") {
+            return None;
+        }
+        let session_ref = terminal
+            .hook_authority
+            .as_ref()
+            .filter(|authority| authority.agent_label == "codex")
+            .and_then(|authority| authority.session_ref.as_ref())
+            .or_else(|| {
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .filter(|session| session.agent == "codex")
+                    .map(|session| &session.session_ref)
+            });
+        Some(
+            session_ref
+                .filter(|session| session.kind == crate::agent_resume::AgentSessionRefKind::Id)
+                .map(|session| session.value.clone()),
+        )
     }
 
     pub(super) fn handle_pane_copy_motion(
@@ -2463,6 +2542,122 @@ mod tests {
                 text: "hello".into(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn config_switch() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let codex_home =
+            std::env::temp_dir().join(format!("herdr-codex-copy-config-{}", std::process::id()));
+        let sessions = codex_home.join("sessions/2026/09/17");
+        std::fs::create_dir_all(&sessions).expect("create Codex sessions path");
+        let session_id = "019d-copy-config";
+        std::fs::write(
+            sessions.join(format!("rollout-test-{session_id}.jsonl")),
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{",
+                "\"type\":\"message\",\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"output_text\",",
+                "\"text\":\"```bash\\necho alpha beta gamma\\n```\"}]}}\n"
+            ),
+        )
+        .expect("write Codex rollout");
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal id")
+            .clone();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state");
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Working,
+            None,
+            Some(crate::agent_resume::AgentSessionRef::id(session_id).expect("session id")),
+            None,
+        );
+        let rows = "• echo alpha beta\n  gamma";
+        let terminal_rows = "• echo alpha beta\r\n  gamma";
+        app.state.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                40,
+                5,
+                1000,
+                terminal_rows.as_bytes(),
+            ),
+        );
+        let params = PaneSelectionReadParams {
+            pane_id: public_pane_id.clone(),
+            anchor: crate::api::schema::PaneTextPoint { row: 0, col: 0 },
+            cursor: crate::api::schema::PaneTextPoint { row: 1, col: 6 },
+            content_revision: None,
+        };
+
+        let joined: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_selection_read_joined("on".into(), params.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            joined.result,
+            ResponseResult::PaneSelectionJoined {
+                pane_id: public_pane_id.clone(),
+                text: "echo alpha beta gamma".into(),
+                joined_breaks: 1,
+                decided_by: crate::api::schema::PaneSelectionJoinDecision::SavedReply,
+            }
+        );
+
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state");
+        terminal.hook_authority = None;
+        terminal.persisted_agent_session = None;
+        let unavailable: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_selection_read_joined("no-session".into(), params.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            unavailable.result,
+            ResponseResult::PaneSelectionJoined {
+                pane_id: public_pane_id.clone(),
+                text: rows.into(),
+                joined_breaks: 0,
+                decided_by: crate::api::schema::PaneSelectionJoinDecision::Unavailable,
+            }
+        );
+
+        app.state.join_agent_wraps = false;
+        let disabled: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_selection_read_joined("off".into(), params))
+                .unwrap();
+        assert_eq!(
+            disabled.result,
+            ResponseResult::PaneSelectionJoined {
+                pane_id: public_pane_id,
+                text: rows.into(),
+                joined_breaks: 0,
+                decided_by: crate::api::schema::PaneSelectionJoinDecision::NotJoined,
+            }
+        );
+
+        if let Some(value) = previous_codex_home {
+            std::env::set_var("CODEX_HOME", value);
+        } else {
+            std::env::remove_var("CODEX_HOME");
+        }
+        std::fs::remove_dir_all(codex_home).expect("remove Codex test home");
     }
 
     #[tokio::test]

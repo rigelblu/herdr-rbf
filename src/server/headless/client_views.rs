@@ -946,3 +946,27 @@ impl HeadlessServer {
         changed | navigation_changed | geometry_changed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    fn selection_params() -> crate::api::schema::PaneSelectionReadParams {
+        crate::api::schema::PaneSelectionReadParams {
+            pane_id: "pane_1".to_owned(),
+            anchor: crate::api::schema::PaneTextPoint { row: 0, col: 0 },
+            cursor: crate::api::schema::PaneTextPoint { row: 0, col: 1 },
+            content_revision: None,
+        }
+    }
+
+    #[test]
+    fn selection_reads_do_not_claim_geometry() {
+        for method in [
+            crate::api::schema::Method::PaneSelectionRead(selection_params()),
+            crate::api::schema::Method::PaneSelectionReadJoined(selection_params()),
+        ] {
+            assert!(!super::HeadlessServer::shell_endpoint_claims_geometry(
+                &method
+            ));
+        }
+    }
+}

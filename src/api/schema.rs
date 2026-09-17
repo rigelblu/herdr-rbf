@@ -171,6 +171,8 @@ pub enum Method {
     PaneClearScreen(PaneTarget),
     #[serde(rename = "pane.selection.read")]
     PaneSelectionRead(PaneSelectionReadParams),
+    #[serde(rename = "pane.selection.read_joined")]
+    PaneSelectionReadJoined(PaneSelectionReadParams),
     #[serde(rename = "pane.copy_motion")]
     PaneCopyMotion(PaneCopyMotionParams),
     #[serde(rename = "pane.copy_search")]
