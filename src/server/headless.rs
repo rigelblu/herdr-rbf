@@ -83,6 +83,7 @@ mod notifications;
 mod render;
 mod retained_surface;
 mod surface_interest;
+mod terminal_attach_title;
 
 // Producers can refill even a bounded channel while it is being drained.
 // Yield to scheduled work and rendering between batches; select! below
@@ -1439,6 +1440,9 @@ impl HeadlessServer {
         if outer_title_synced {
             self.sync_window_title();
         }
+        if !sources.is_empty() {
+            self.sync_terminal_attach_titles();
+        }
         (
             self.app.terminal_title_sidebar_changed(&changes),
             outer_title_synced,
@@ -1827,6 +1831,7 @@ impl HeadlessServer {
         info!(client_id, cols, rows, terminal_id = %terminal_id, "terminal attach client connected");
         self.terminal_attach_owners
             .insert(terminal_id.clone(), client_id);
+        self.sync_terminal_attach_titles();
         self.app
             .state
             .direct_attach_resize_locks

@@ -194,6 +194,8 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_uses_endpoint_keybindings: bool,
     /// Channels for sending framed ServerMessage data to the client writer thread.
     pub(crate) writer: Option<ClientWriter>,
+    /// Last window title sent to this terminal attach client.
+    pub(crate) terminal_attach_title_sent: Option<String>,
 }
 
 impl ClientConnection {
@@ -256,6 +258,7 @@ impl ClientConnection {
             shell_deferred_navigation_response: None,
             shell_uses_endpoint_keybindings: false,
             writer,
+            terminal_attach_title_sent: None,
         }
     }
 

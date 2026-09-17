@@ -18,6 +18,8 @@ pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
 mod git_refresh;
+#[cfg(unix)]
+mod handoff_titles;
 mod ids;
 mod popup;
 mod runtime;
@@ -738,6 +740,7 @@ impl App {
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        app.restore_terminal_titles_after_handoff();
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());
