@@ -5,7 +5,17 @@ title: herdr-rbf RBF Changelog
 Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release history stays in the root `CHANGELOG.md`.
 
 # 🔵⋯ [Unreleased]
-(empty)
+
+---
+
+# 🔵⋯ v0.6.0 (2026-09-18)
+## 🟠⋯ Added for End Users
+- 2026-09-17 - feat (user need) | copy Codex replies without display-only wrap breaks or reply gutters while preserving Codex's real line breaks, with an explicit copied-as-shown fallback whenever the saved reply cannot prove the reconstruction
+- 2026-09-18 - feat (user need) | the copy toast now says what happened: `copied · rejoined N wrapped lines` when herdr changed the text, `copied as shown · agent text unavailable` when it wanted Codex's text and couldn't get it — no hook, no session id, an unreadable session file, a spent budget, or rows matching two saved replies differently — and `copied to clipboard` otherwise, including every drag over command output, a diff or a tool row in a Codex pane
+
+## 🟠⋯ Added for Technical Users
+- 2026-09-18 - feat (technical) | `join_agent_wraps` under `[ui.copy]` turns the joining off (default `true`); the server reads it on `herdr server reload-config`. The join runs server-side, so the machine hosting the pane is the one to configure
+- 2026-09-18 - feat (technical) | new advertised method `pane.selection.read_joined`, alongside the unchanged `pane.selection.read`. A client that meets a server without it copies exactly as before
 
 ---
 
