@@ -34,6 +34,15 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - Turn it off with `clear_screen = ""` under `[keys]` in `~/.config/herdr/config.toml`, or rebind `keys.clear_screen`. `prefix+?` lists it
 - If ⌘K does nothing, your terminal app is taking the key first. cmux passes it through. Ghostty on its own, kitty on macOS, iTerm2, and Terminal.app may bind ⌘K to their own clear: unbind it there, or rebind `keys.clear_screen`
 
+## 🟠⋯ Copy Codex replies without their display wrapping
+- Drag across a Codex reply in herdr's full view and copy it to get the text Codex actually wrote: display-only wrap breaks and the reply gutter are removed, while Codex's own line breaks remain
+- This applies only to reply prose and code. Prompts, command output, diffs, tool rows, Claude Code, other agents, and attach tabs copy exactly as drawn
+- Run `herdr pane get <pane>` on the machine running the server and check that it shows `agent_session` with `"agent": "codex"`. If it doesn't, run `herdr integration install codex` on that machine and start the Codex pane again
+- Herdr uses Codex's saved session reply as the authority. When it wanted that text and could not get it — no session hook, no session ID, an unreadable session file, or the lookup ran past its budget — it copies the rows as drawn and says `copied as shown · agent text unavailable`. It says the same when the rows match two saved replies differently, because joining would mean guessing
+- Rows that match no saved reply are an ordinary copy, not a failure: command output, diffs and tool rows in a Codex pane copy as drawn and say `copied to clipboard`
+- A successful reconstruction says how many wrapped lines it rejoined. Ordinary copies still say `copied to clipboard`
+- To always copy the drawn rows, set `join_agent_wraps = false` under `[ui.copy]` in `~/.config/herdr/config.toml`, then run `herdr server reload-config` on that machine. For a remote pane, edit and reload the remote server's config
+
 ## 🟠⋯ Agent names on attached tabs
 - A window running `herdr terminal attach` shows its pane's title, status symbol included (`✳ my session`). cmux names the tab from it, so a tab showing a herdr-held agent reads the same as the agent running directly in cmux
 - The name follows every change: renames, and the symbol while the agent works
