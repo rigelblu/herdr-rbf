@@ -20,6 +20,9 @@ zmodload zsh/zselect
 here=${0:A:h}
 links=$here/bin
 launcher=${here:h:h}/bin/herdr-agent
+# The paths the launcher reports are its own view: the tree beside it, unresolved. From a
+# checkout that's $here; installed, $here is the dated tree the share link points at
+launcher_links=${launcher:h:h}/share/herdr-agent/bin
 herdr=${commands[herdr]:-$HOME/.local/bin/herdr}
 session=herdr-agent-check-$$
 launch_dir=${TMPDIR:-/tmp}/herdr-agent
@@ -444,8 +447,8 @@ else
 fi
 # cmux replays this program after a restart: it has to be the link, not the real pi,
 # or the restart runs pi in the tab beside the one still running in herdr
-if [[ ${got[CMUX_AGENT_LAUNCH_KIND]-} == pi && ${got[CMUX_AGENT_LAUNCH_EXECUTABLE]-} == "$links/pi" &&
-  ${got[CMUX_AGENT_LAUNCH_ARGV_B64]-} == "$(print -rN -- $links/pi "${args[@]}" | base64 | tr -d '\n')" &&
+if [[ ${got[CMUX_AGENT_LAUNCH_KIND]-} == pi && ${got[CMUX_AGENT_LAUNCH_EXECUTABLE]-} == "$launcher_links/pi" &&
+  ${got[CMUX_AGENT_LAUNCH_ARGV_B64]-} == "$(print -rN -- $launcher_links/pi "${args[@]}" | base64 | tr -d '\n')" &&
   ${got[CMUX_AGENT_LAUNCH_CWD]-} == "$PWD" ]]; then
   pass "cmux records the launch as this launcher's pi link"
 else
@@ -460,7 +463,7 @@ else
 fi
 # claude is the one agent the shim can move, so prove the launcher wires it and keeps a real
 # cmux for the shim to call. route_hooks is called directly: no claude is launched here
-want_hooked="$here/hook-cmux"$'\t'"$work/fake-cmux"
+want_hooked="${launcher_links:h}/hook-cmux"$'\t'"$work/fake-cmux"
 # cmux names the cmux for claude's hooks; the launcher steps in front of whichever it set
 hooked=$(CMUX_CLAUDE_HOOK_CMUX_BIN=$work/fake-cmux $work/hooks-probe $launcher claude)
 if [[ $hooked == $want_hooked ]]; then

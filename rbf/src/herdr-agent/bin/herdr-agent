@@ -31,8 +31,17 @@
 #                                   restart; in a cmux tab, `herdr --remote …` runs this
 #   herdr-agent attach --restore    what cmux runs after a restart: this tab's pane, or its
 #                                   remote herdr, again
-#   herdr-agent install             link herdr-agent into ~/.local/bin, add cmux's restart entry
+#   herdr-agent cmux-restart        add cmux's restart entries (formerly `install`); approve
+#                                   them in cmux Settings
 #   herdr-agent check               prove the herdr steps in a throwaway session
+#
+# Install (from a herdr-rbf checkout; runs from the copy, not the checkout)
+#   rbf/scripts/install-rbf.sh                  herdr and herdr-agent together
+#   rbf/scripts/install-rbf.sh --herdr-agent    herdr-agent alone: no build, no session handoff
+#   rbf/scripts/install-rbf.sh --herdr-agent --rollback
+#                                   put back the previous herdr-agent; again returns to the newer
+#   It lands in ~/.local/bin/herdr-agent and ~/.local/share/herdr-agent, and those paths are
+#   the contract: cmux's saved restore records and running agents keep them
 #
 # Settings (environment)
 #   HERDR_AGENT=off | on       skip herdr for one command, or use it even when switched off
@@ -80,7 +89,7 @@
 #     drops cmux's access token, so cmux refuses its hooks from herdr in any stricter mode
 #   cmux's pi and agy integrations: cmux hooks pi install / cmux hooks agy install
 #   cmux's `herdr-agent-attach` restart entry in ~/.config/cmux/restart-commands.json
-#     (herdr-agent install adds it, backing the file up; approve it in cmux Settings)
+#     (herdr-agent cmux-restart adds it, backing the file up; approve it in cmux Settings)
 #
 # Known gaps
 #   An agent cmux saved before herdr-agent existed restores outside herdr, because cmux
@@ -634,7 +643,7 @@ cmd_status() {
   if restart_entry_installed; then
     print -r -- "  cmux restore   entries $restart_id and $restart_id-remote present (cmux asks to approve changes)"
   else
-    print -r -- "  cmux restore   missing or outdated: herdr-agent install (attached and remote tabs won't come back after a cmux restart)"
+    print -r -- "  cmux restore   missing or outdated: herdr-agent cmux-restart (attached and remote tabs won't come back after a cmux restart)"
   fi
   if (( ${+found[agy]} )); then
     if grep -q 'hooks antigravity' -- $HOME/.gemini/config/hooks.json 2>/dev/null; then
@@ -790,13 +799,10 @@ install_restart_entry() {
   print -r -- "added cmux restart entries $restart_id and $restart_id-remote to $file; approve them in cmux Settings"
 }
 
-cmd_install() {
-  local target=$HOME/.local/bin/herdr-agent
-  if [[ -e $target && ${target:A} != "$self" ]]; then
-    die "$target already exists and isn't this script; move it first"
-  fi
-  mkdir -p -- ${target:h} && ln -sfn -- $self $target || die "couldn't link $target"
-  print -r -- "linked $target -> $self"
+# Installing herdr-agent itself is rbf/scripts/install-rbf.sh's job, so this only
+# writes cmux's restart entries. It links nothing: run from a checkout, a link would
+# point ~/.local/bin back at the checkout
+cmd_cmux_restart() {
   install_restart_entry || die "couldn't add the cmux restart entry"
 }
 
@@ -820,7 +826,7 @@ case ${1:-status} in
     [[ ${2:-} == --remote ]] && { shift; attach_remote "$@" }
     cmd_attach ${2:-} ${3:-}
     ;;
-  (install) cmd_install ;;
+  (cmux-restart) cmd_cmux_restart ;;
   (check)
     shift
     exec ${self:h:h}/share/herdr-agent/check "$@"
