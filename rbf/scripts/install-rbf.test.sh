@@ -6,21 +6,27 @@
 #   cases: dry-run install hosting failed-handoff interrupted-handoff classify rollback refusals first-install
 #          path-shadow alt-screen attached-window wedged real-agent busy-shell
 #
-# Each case gets its own HOME and XDG dirs under /Volumes/tom-ssd/tmp/rbf-h/<case>
-# (short, so socket paths stay under macOS's 104 bytes), starts headless sessions from
-# an "old" exec wrapper around the build under test, and refuses any socket outside
-# that base. Tom's real sessions and ~/.local/bin are never touched.
+# Each case gets its own HOME and XDG dirs under <root>/<case> (short, so socket paths
+# stay under macOS's 104 bytes), starts headless sessions from an "old" exec wrapper
+# around the build under test, and refuses any socket outside that base. Your real
+# sessions and ~/.local/bin are never touched.
 #
+# <root> is $RBF_TEST_ROOT, else $EXTERNAL_DRIVE/tmp/rbf-h. A root on a volume under
+# /Volumes must be mounted, so a case never writes onto the boot disk in its place.
 # RBF_TEST_SKIP_BUILD=1 skips the up-front `cargo build --release --locked`.
 # bash 3.2 compatible: per-session values live in files.
 
 set -uo pipefail
 
 CASE="${1:-}"
+# The real home, saved before any case points HOME at its own base (real-agent needs
+# claude's login)
+REAL_HOME="$HOME"
+ROOT="${RBF_TEST_ROOT:-${EXTERNAL_DRIVE:+$EXTERNAL_DRIVE/tmp/rbf-h}}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL="$REPO/rbf/scripts/install-rbf.sh"
 BUILD="$REPO/target/release/herdr"
-BASE="/Volumes/tom-ssd/tmp/rbf-h/$CASE"
+BASE="$ROOT/$CASE"
 BIN_DIR="$BASE/.local/bin"
 TARGET="$BIN_DIR/herdr"
 PREVIOUS="$BIN_DIR/herdr.previous"
@@ -150,11 +156,25 @@ attach_window() {
 }
 
 setup() {
-  case "$BASE" in /Volumes/tom-ssd/tmp/rbf-h/?*) ;; *) echo "bad base: $BASE" >&2; exit 1 ;; esac
-  if ! mount | grep -Fq " on /Volumes/tom-ssd ("; then
-    echo "external drive not mounted" >&2
-    exit 1
-  fi
+  case "$ROOT" in
+    /?*) ;;
+    *)
+      echo "no scratch root: set RBF_TEST_ROOT, or EXTERNAL_DRIVE (root \$EXTERNAL_DRIVE/tmp/rbf-h)" >&2
+      exit 1
+      ;;
+  esac
+  case "$BASE" in "$ROOT"/?*) ;; *) echo "bad base: $BASE" >&2; exit 1 ;; esac
+  # A root on an unmounted volume would land on the boot disk under /Volumes instead
+  local volume
+  case "$ROOT" in
+    /Volumes/?*)
+      volume="/Volumes/$(printf '%s' "${ROOT#/Volumes/}" | cut -d/ -f1)"
+      if ! mount | grep -Fq " on $volume ("; then
+        echo "$volume not mounted" >&2
+        exit 1
+      fi
+      ;;
+  esac
   if [ "${RBF_TEST_SKIP_BUILD:-}" != 1 ]; then
     (cd "$REPO" && cargo build --release --locked) || { echo "build failed" >&2; exit 1; }
   fi
@@ -651,7 +671,7 @@ case_real_agent() {
   claude_bin="$(command -v claude)"
   [ -n "$claude_bin" ] || { fail "claude not found on this shell's PATH"; return; }
   pane="$(new_pane work)"
-  send_line work "$pane" "HOME=/Users/tomhosiawa '$claude_bin' --model haiku 'reply with the word ready'"
+  send_line work "$pane" "HOME='$REAL_HOME' '$claude_bin' --model haiku 'reply with the word ready'"
   sleep 25
   claude_pid="$(pgrep -f -- "--model haiku reply with the word ready" | head -1)"
   isolated_env "$OLD" --session work agent get "$pane" > "$BASE/agent-before.txt" 2>&1
