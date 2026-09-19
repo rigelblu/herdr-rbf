@@ -58,17 +58,18 @@ fn fast_path_blocker(
     state: &ClientShellState,
     patch: &crate::protocol::PaneSurfacePatch,
 ) -> Option<&'static str> {
+    let attached_terminal = state.config.attached_terminal;
     if state.mode != ClientShellMode::Terminal {
         Some("client_surface_patch.fallback.mode")
-    } else if state.overlay.is_some() {
+    } else if !attached_terminal && state.overlay.is_some() {
         Some("client_surface_patch.fallback.overlay")
-    } else if state.endpoint_error.is_some() {
+    } else if !attached_terminal && state.endpoint_error.is_some() {
         Some("client_surface_patch.fallback.endpoint_error")
-    } else if state.config_diagnostic.is_some() {
+    } else if !attached_terminal && state.config_diagnostic.is_some() {
         Some("client_surface_patch.fallback.config_diagnostic")
-    } else if state.visible_endpoint_notice.is_some() {
+    } else if !attached_terminal && state.visible_endpoint_notice.is_some() {
         Some("client_surface_patch.fallback.endpoint_notice")
-    } else if state.visible_notification.is_some() {
+    } else if !attached_terminal && state.visible_notification.is_some() {
         Some("client_surface_patch.fallback.notification")
     } else if state.copy_feedback.is_some() {
         Some("client_surface_patch.fallback.copy_feedback")

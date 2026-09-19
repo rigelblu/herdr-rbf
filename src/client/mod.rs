@@ -31,6 +31,8 @@ mod image_files;
 mod input;
 mod loop_config;
 mod notifications;
+#[cfg(unix)]
+mod semantic_attach;
 mod shell;
 mod shell_runtime;
 mod startup;
@@ -185,7 +187,8 @@ fn run_client_with_mode(
     // `setup_terminal_with_capabilities` instead of emitting raw escapes early.
     #[cfg(not(windows))]
     crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
-    let client_rendered_shell = attach_request.is_none();
+    let requested_attach = attach_request.is_some();
+    let client_rendered_shell = true;
     let socket_path = client_socket_path();
     let keybinding_source = client_shell_keybinding_source();
     let startup_config_diagnostic =
@@ -195,11 +198,16 @@ fn run_client_with_mode(
             crate::config::config_diagnostic_summary(&loaded_config.diagnostics)
         };
     let shell_config = client_rendered_shell.then(|| {
-        shell::ClientShellConfig::from_config(&loaded_config.config)
+        let config = shell::ClientShellConfig::from_config(&loaded_config.config)
             .with_startup_config_diagnostic(startup_config_diagnostic)
             .with_startup_onboarding(loaded_config.config.should_show_onboarding())
             .with_keybinding_source(keybinding_source)
-            .with_process_endpoint_preferences(&socket_path)
+            .with_process_endpoint_preferences(&socket_path);
+        if requested_attach {
+            config.with_attached_terminal()
+        } else {
+            config
+        }
     });
     let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
@@ -232,7 +240,7 @@ fn run_client_with_mode(
     crate::logging::startup("client");
     info!(path = %socket_path.display(), "{log_message}");
 
-    let endpoint_catalog = if client_rendered_shell && !is_remote_client_process() {
+    let endpoint_catalog = if !requested_attach && !is_remote_client_process() {
         endpoint::EndpointCatalog::load().unwrap_or_else(|error| {
             warn!(%error, "saved SSH endpoint catalog is unavailable");
             endpoint::EndpointCatalog::default()
@@ -259,29 +267,29 @@ fn run_client_with_mode(
     let (cols, rows, cell_width_px, cell_height_px, exact_cell_size) =
         initial_terminal_geometry(pixel_geometry_enabled, kitty_graphics_enabled)?;
 
-    let direct_attach = attach_escape.is_some();
-    let mut terminal_guard = if direct_attach {
-        setup_direct_attach_terminal(mouse_capture)
+    // herdr-rbf `hrdr-8.3`: a terminal attach sets up the terminal only after the
+    // server answers, because the answer picks the rendered client or the byte-stream
+    // attach. Its hellos therefore go out before the host probe and report no SGR pixel
+    // mouse, as for a host that never answered; the next resize reports the probed value.
+    let pre_handshake_terminal_guard = if requested_attach {
+        None
     } else {
-        setup_terminal(mouse_capture)
-    }
-    .map_err(|err| {
-        eprintln!("herdr: failed to set up terminal: {err}");
-        err
-    })?;
-    loop_config.host_escape_disambiguation_active =
-        terminal_guard.host_escape_disambiguation_active();
-    loop_config.host_sgr_pixel_mouse = terminal_guard.host_sgr_pixel_mouse();
-    loop_config.initial_host_input = terminal_guard.take_buffered_host_input();
+        Some(setup_client_terminal(
+            false,
+            mouse_capture,
+            &mut loop_config,
+        )?)
+    };
 
     let shell_surface_size = loop_config
         .shell_config
         .as_ref()
         .map(|shell| shell.initial_surface_size(cols, rows));
     // Healthy Local attaches directly; only an actual failure enters background recovery.
+    let mut semantic_attach = false;
     let initial = initial_stream
         .map(|mut stream| {
-            let handshake = do_handshake(
+            let mut handshake = do_handshake(
                 &mut stream,
                 cols,
                 rows,
@@ -294,7 +302,7 @@ fn run_client_with_mode(
                 shell_surface_size,
                 endpoint_keybindings,
                 loop_config.mouse_capture_active,
-                true,
+                !requested_attach,
                 !is_remote_client_process(),
                 &AtomicBool::new(false),
             )
@@ -311,14 +319,27 @@ fn run_client_with_mode(
                     "Local needs a server update before it can participate in multi-machine viewing",
                 ));
             }
-            if let Some((terminal_id, takeover)) = attach_request {
-                write_to_server(
-                    &mut stream,
-                    &ClientMessage::AttachTerminal {
-                        terminal_id,
-                        takeover,
+            if let Some((terminal_id, takeover)) = attach_request.clone() {
+                (stream, handshake, semantic_attach) = semantic_attach::prepare_connection(
+                    stream,
+                    handshake,
+                    terminal_id,
+                    takeover,
+                    &socket_path,
+                    semantic_attach::AttachGeometry {
+                        cols,
+                        rows,
+                        cell_width_px,
+                        cell_height_px,
+                        exact_cell_size,
+                        mouse_capture: loop_config.mouse_capture_active,
                     },
                 )?;
+                if !semantic_attach {
+                    loop_config.shell_config = None;
+                    loop_config.kitty_graphics_enabled = false;
+                    loop_config.endpoint_keybindings = false;
+                }
             }
             Ok((stream, handshake))
         })
@@ -330,6 +351,14 @@ fn run_client_with_mode(
             None
         }
         Err(error) => return Err(error),
+    };
+
+    let terminal_guard = match pre_handshake_terminal_guard {
+        Some(terminal_guard) => terminal_guard,
+        None => {
+            let direct_attach = requested_attach && !semantic_attach;
+            setup_client_terminal(direct_attach, mouse_capture, &mut loop_config)?
+        }
     };
 
     // Install a panic hook so the foreground client always restores its terminal.
@@ -368,7 +397,7 @@ fn run_client_with_mode(
             exact_cell_size,
             should_quit,
             loop_config,
-            attach_escape,
+            if semantic_attach { None } else { attach_escape },
             &terminal_guard,
         )
         .await
@@ -400,6 +429,28 @@ fn run_client_with_mode(
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("client");
     Ok(())
+}
+
+/// Enters raw mode and passes what the host probe learned to the client loop.
+fn setup_client_terminal(
+    direct_attach: bool,
+    mouse_capture: bool,
+    loop_config: &mut ClientLoopConfig,
+) -> io::Result<TerminalGuard> {
+    let mut terminal_guard = if direct_attach {
+        setup_direct_attach_terminal(mouse_capture)
+    } else {
+        setup_terminal(mouse_capture)
+    }
+    .map_err(|err| {
+        eprintln!("herdr: failed to set up terminal: {err}");
+        err
+    })?;
+    loop_config.host_escape_disambiguation_active =
+        terminal_guard.host_escape_disambiguation_active();
+    loop_config.host_sgr_pixel_mouse = terminal_guard.host_sgr_pixel_mouse();
+    loop_config.initial_host_input = terminal_guard.take_buffered_host_input();
+    Ok(terminal_guard)
 }
 
 // This guards server-supplied paths only. Client-owned temporary files generated
@@ -618,9 +669,29 @@ async fn run_client_loop(
         } else {
             crate::protocol::MAX_FRAME_SIZE
         };
+        let handshake::HandshakeResult {
+            endpoint_methods,
+            endpoint_capabilities,
+            prefetched_messages,
+            ..
+        } = handshake;
+        for message in prefetched_messages {
+            event_tx
+                .try_send(ClientLoopEvent::ServerMessage {
+                    endpoint_id: endpoint::ClientEndpointId::Local,
+                    generation: 1,
+                    message: Box::new(message),
+                })
+                .map_err(|_| {
+                    ClientError::ConnectionLost(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "client event loop closed during terminal attach startup",
+                    ))
+                })?;
+        }
         let negotiation = endpoint::EndpointNegotiation::new(
-            handshake.endpoint_methods.unwrap_or_default(),
-            handshake.endpoint_capabilities.unwrap_or_default(),
+            endpoint_methods.unwrap_or_default(),
+            endpoint_capabilities.unwrap_or_default(),
         );
         let surface_decoder = negotiated_surface_decoder(&negotiation);
         let transport = start_endpoint_transport(

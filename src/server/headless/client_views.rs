@@ -9,6 +9,13 @@ pub(super) struct ShellFocusTarget {
     pub(super) pane_id: crate::layout::PaneId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AttachedShellTarget {
+    pub(super) workspace_index: usize,
+    pub(super) tab_index: usize,
+    pub(super) pane_id: crate::layout::PaneId,
+}
+
 fn classify_shell_focus_transition<'a>(
     before: Option<&'a ShellFocusTarget>,
     after: Option<&'a ShellFocusTarget>,
@@ -51,6 +58,16 @@ pub(super) fn forward_proxied_api_response(
 }
 
 impl HeadlessServer {
+    pub(super) fn attached_shell_target(&self, client_id: u64) -> Option<AttachedShellTarget> {
+        let terminal_id = self.clients.get(&client_id)?.attached_terminal_id()?;
+        let target = self.app.resolve_terminal_target(terminal_id).ok()?;
+        Some(AttachedShellTarget {
+            workspace_index: target.ws_idx,
+            tab_index: target.tab_idx,
+            pane_id: target.pane_id,
+        })
+    }
+
     pub(super) fn default_shell_target(&self) -> Option<crate::ui::TabSurfaceTarget> {
         let workspace_index = self.app.state.active?;
         let workspace = self.app.state.workspaces.get(workspace_index)?;
@@ -64,11 +81,16 @@ impl HeadlessServer {
         &self,
         client_id: u64,
     ) -> Option<crate::ui::TabSurfaceTarget> {
-        let tab_id = self
-            .clients
-            .get(&client_id)?
-            .shell_location
-            .as_ref()
+        let client = self.clients.get(&client_id)?;
+        if let Some(terminal_id) = client.attached_terminal_id() {
+            let target = self.app.resolve_terminal_target(terminal_id).ok()?;
+            return Some(crate::ui::TabSurfaceTarget {
+                workspace_index: target.ws_idx,
+                tab_index: target.tab_idx,
+            });
+        }
+        let tab_id = client
+            .shell_location()
             .and_then(crate::server::clients::ClientShellLocation::focused_tab_id);
         tab_id
             .and_then(|tab_id| self.app.parse_tab_id(tab_id))
@@ -150,13 +172,18 @@ impl HeadlessServer {
             .values_mut()
             .filter(|client| client.is_shell_client())
         {
-            let location = client.shell_location.get_or_insert_with(|| {
-                crate::server::clients::ClientShellLocation {
-                    focused_workspace_id: topology.focused_workspace_id.clone(),
-                    active_tab_ids: topology.active_tab_ids.clone(),
-                }
-            });
-            location.reconcile(&topology);
+            if client.shell_presentation.is_none() {
+                client.shell_presentation =
+                    Some(crate::server::clients::ClientShellPresentation::Workspace(
+                        crate::server::clients::ClientShellLocation {
+                            focused_workspace_id: topology.focused_workspace_id.clone(),
+                            active_tab_ids: topology.active_tab_ids.clone(),
+                        },
+                    ));
+            }
+            if let Some(location) = client.shell_location_mut() {
+                location.reconcile(&topology);
+            }
         }
     }
 
@@ -175,7 +202,7 @@ impl HeadlessServer {
             .values_mut()
             .filter(|client| client.is_shell_client())
         {
-            if let Some(location) = client.shell_location.as_mut() {
+            if let Some(location) = client.shell_location_mut() {
                 location.focus_tab(workspace_id.clone(), tab_id.clone());
             }
         }
@@ -193,7 +220,7 @@ impl HeadlessServer {
         let Some(client) = self.clients.get_mut(&client_id) else {
             return false;
         };
-        let Some(location) = client.shell_location.as_mut() else {
+        let Some(location) = client.shell_location_mut() else {
             return false;
         };
         location.focus_tab(workspace_id, tab_id.to_owned());
@@ -340,7 +367,7 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     return false;
                 };
-                let Some(location) = client.shell_location.as_mut() else {
+                let Some(location) = client.shell_location_mut() else {
                     return false;
                 };
                 location.focus_workspace(workspace_id);
@@ -387,6 +414,16 @@ impl HeadlessServer {
     }
 
     pub(super) fn shell_focus_target(&self, client_id: u64) -> Option<ShellFocusTarget> {
+        if let Some(target) = self.attached_shell_target(client_id) {
+            return Some(ShellFocusTarget {
+                tab_id: self.tab_id_for_target(crate::ui::TabSurfaceTarget {
+                    workspace_index: target.workspace_index,
+                    tab_index: target.tab_index,
+                })?,
+                workspace_index: target.workspace_index,
+                pane_id: target.pane_id,
+            });
+        }
         self.focus_target_for_surface(self.shell_target_for_client(client_id)?)
     }
 
@@ -496,6 +533,9 @@ impl HeadlessServer {
         workspace_index: usize,
         pane_id: crate::layout::PaneId,
     ) -> bool {
+        if let Some(target) = self.attached_shell_target(client_id) {
+            return target.workspace_index == workspace_index && target.pane_id == pane_id;
+        }
         let Some(target) = self.shell_target_for_client(client_id) else {
             return false;
         };
@@ -695,6 +735,9 @@ impl HeadlessServer {
         client_id: u64,
         start_pending_agent_resumes: bool,
     ) -> bool {
+        if self.attached_shell_target(client_id).is_some() {
+            return false;
+        }
         if !self
             .clients
             .get(&client_id)
@@ -716,6 +759,9 @@ impl HeadlessServer {
         client_id: u64,
         start_pending_agent_resumes: bool,
     ) -> bool {
+        if self.attached_shell_target(client_id).is_some() {
+            return false;
+        }
         if !self
             .clients
             .get(&client_id)
@@ -738,6 +784,9 @@ impl HeadlessServer {
         client_id: u64,
         start_pending_agent_resumes: bool,
     ) -> bool {
+        if self.attached_shell_target(client_id).is_some() {
+            return false;
+        }
         if !self
             .clients
             .get(&client_id)
@@ -912,6 +961,9 @@ impl HeadlessServer {
         client_id: u64,
         msg: api::ApiRequestMessage,
     ) -> bool {
+        if self.attached_shell_target(client_id).is_some() {
+            return self.handle_api_request_with_shutdown_check_inner(msg, false, true);
+        }
         let focus_before = self.shell_focus_target(client_id);
         let focused_tabs_before = self.focused_shell_tabs();
         let method_claims_geometry = Self::shell_endpoint_claims_geometry(&msg.request.method);

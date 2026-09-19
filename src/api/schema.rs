@@ -78,6 +78,7 @@ operations::define_operations! {
     TabRename(TabRenameParams) => "tab.rename", true, true;
     TabMove(TabMoveParams) => "tab.move", true, true;
     TabClose(TabTarget) => "tab.close", true, true;
+    TerminalAttach(TerminalAttachParams) => "terminal.attach", false, true;
     AgentList(EmptyParams) => "agent.list", false, false;
     AgentGet(AgentTarget) => "agent.get", false, false;
     AgentRead(AgentReadParams) => "agent.read", false, false;
