@@ -8,6 +8,22 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.7.0 (2026-09-19)
+## 🟠⋯ 🚨 Breaking Changes for End Users
+- 2026-09-19 - refactor (user need) | `herdr-agent install` is now `herdr-agent cmux-restart`, and it only adds cmux's restart entries; `rbf/scripts/install-rbf.sh` installs the command itself (#hrdr-9)
+
+## 🟠⋯ Added for End Users
+- 2026-09-19 - feat (user need) | herdr-agent now lives in the fork (`rbf/src/herdr-agent`) and installs with it into `~/.local`: type `claude`, `codex`, `pi` or `agy` in a cmux tab and the agent runs in this checkout's herdr session, so closing the tab or restarting cmux doesn't stop it (#hrdr-9)
+- 2026-09-19 - feat (user need) | `rbf/scripts/install-rbf.sh --herdr-agent` installs herdr-agent alone, with no build and no session handoff. Each copy is checked before it goes live, and `--herdr-agent --rollback` puts the previous one back without touching `herdr` or any session (#hrdr-9)
+
+## 🟠⋯ Added for Technical Users
+- 2026-09-19 - feat (technical) | exit code `3` now also means herdr-agent's part didn't finish after `herdr` installed: herdr-agent itself, cmux's restart entries, or keeping its rollback target. `--herdr-agent` needs `python3`, as the plain install already did (#hrdr-9)
+
+## 🟠⋯ Fixed for Builders
+- 2026-09-19 - fix (technical) | the install test harness no longer names a home folder or drive: it takes its scratch root from `$EXTERNAL_DRIVE` (override with `RBF_TEST_ROOT`) (#hrdr-9)
+
+---
+
 # 🔵⋯ v0.6.0 (2026-09-18)
 ## 🟠⋯ Added for End Users
 - 2026-09-17 - feat (user need) | copy Codex replies without display-only wrap breaks or reply gutters while preserving Codex's real line breaks, with an explicit copied-as-shown fallback whenever the saved reply cannot prove the reconstruction
