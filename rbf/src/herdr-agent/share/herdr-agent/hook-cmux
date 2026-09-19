@@ -1,0 +1,59 @@
+#!/bin/zsh -f
+# Stands in for cmux in the hooks of an agent running in a herdr pane, so its status and
+# notifications reach the tab showing that pane now, not the tab it was started in.
+#
+# An agent's environment is fixed when it starts, so its hooks keep naming that first tab
+# and that first attach process. cmux reads the process's terminal to decide which tab to
+# tell, so once the pane is shown somewhere else those hooks land on the wrong tab, or on
+# nothing (the process ID can even be reused by an unrelated agent by then).
+#
+# `herdr-agent attach` notes which tab shows each pane. This reads that note and passes
+# the tab, its workspace and the live attach process to cmux. Anything missing or stale:
+# run cmux unchanged, so a hook never fails because of this.
+
+# Never exec ourselves: a cmux naming this shim would exec it again, forever. `:A` resolves
+# symlinks, so it still catches us when the hook reached here through the dotfiles link.
+# Read $0 out here — inside a function zsh makes it the function's name
+me=${0:A}
+real=${HERDR_AGENT_CMUX_BIN:-${CMUX_BUNDLED_CLI_PATH:-}}
+[[ -x $real && ${real:A} != $me ]] || real=${commands[cmux]:-}
+[[ -x $real && ${real:A} != $me ]] || {
+  print -ru2 -- "herdr-agent: no cmux to run for this hook that isn't this shim"; exit 0 }
+
+route() {
+  local note surface workspace pid agent var i
+  local dir=${HERDR_AGENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent}
+  [[ -n ${HERDR_SESSION:-} && -n ${HERDR_PANE_ID:-} ]] || return 0
+  note=$dir/panes/$HERDR_SESSION.$HERDR_PANE_ID
+  [[ -f $note ]] || return 0
+  IFS=$'\t' read -r surface workspace pid <$note
+  # a note outlives its tab; without that process cmux has nothing to resolve
+  [[ -n $surface && -n $pid ]] && kill -0 $pid 2>/dev/null || return 0
+  # the agent names the variable cmux reads, and it arrives in one of two shapes:
+  # `cmux [--socket …] hooks <agent> <event>` and `cmux [--socket …] hooks feed --source <agent>`
+  for (( i = 1; i <= $#argv; i++ )); do
+    [[ $argv[i] == hooks ]] && { agent=${argv[i + 1]:-}; break }
+  done
+  if [[ $agent == feed ]]; then
+    agent=
+    for (( i = 1; i <= $#argv; i++ )); do
+      [[ $argv[i] == --source ]] && { agent=${argv[i + 1]:-}; break }
+    done
+  fi
+  # pi is deliberately absent. Its hooks carry --surface and --workspace built from pi's own
+  # environment, and an explicit flag beats anything we export; pi also spawns them through an
+  # allowlist that drops HERDR_*, so this script returns at the guard above before it gets here.
+  # pi's status stays on the tab it started in — an arm here would not change that
+  case $agent in
+    (claude) var=CMUX_CLAUDE_PID ;;
+    (codex) var=CMUX_CODEX_PID ;;
+    (antigravity) var=CMUX_ANTIGRAVITY_PID ;;
+    (*) return 0 ;;
+  esac
+  export CMUX_SURFACE_ID=$surface
+  [[ -n $workspace ]] && export CMUX_WORKSPACE_ID=$workspace
+  export $var=$pid
+}
+
+route "$@"
+exec $real "$@"

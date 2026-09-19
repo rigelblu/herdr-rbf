@@ -1,0 +1,711 @@
+#!/bin/zsh -f
+# herdr-agent check [--with-claude] — prove the herdr steps in a throwaway herdr session.
+#
+# It checks the argument rules (which launches go to herdr, which resume IDs
+# count), then runs the real launcher through the pi link, from a
+# pseudo-terminal, with a stand-in for the agent and for the attach step, and:
+#   - hangs up that terminal, as closing a tab does
+#   - checks the server and the agent survived, at normal priority
+#   - checks the agent got the exact environment, arguments and herdr variables
+#   - checks the pane closed when the agent exited
+# With --with-claude it also starts the real claude (no prompt is sent), then
+# resumes its session and checks the launcher attached instead of starting a copy.
+# Run it from a folder Claude already trusts. The session is removed at the end.
+# Rerun it after updating cmux or herdr.
+
+emulate -R zsh
+setopt extended_glob no_bg_nice
+zmodload zsh/zselect
+
+here=${0:A:h}
+links=$here/bin
+launcher=${here:h:h}/bin/herdr-agent
+herdr=${commands[herdr]:-$HOME/.local/bin/herdr}
+session=herdr-agent-check-$$
+launch_dir=${TMPDIR:-/tmp}/herdr-agent
+work=$(mktemp -d "${TMPDIR:-/tmp}/herdr-agent-check.XXXXXX") || exit 1
+with_claude=0
+[[ ${1:-} == --with-claude ]] && with_claude=1
+failures=0
+
+# The check plays a plain terminal, even when it runs inside herdr, or from an agent the
+# launcher started (which carries the real cmux its hook shim calls)
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH \
+  HERDR_SESSION HERDR_BIN_PATH HERDR_AGENT_LAUNCH HERDR_AGENT_CMUX_BIN
+
+pass() { print -r -- "  ok    $*" }
+fail() { print -r -- "  FAIL  $*"; (( failures++ )) }
+skip() { print -r -- "  skip  $*" }
+nap() { zselect -t ${1:-10} 2>/dev/null || true }
+h() { $herdr --session $session "$@" }
+wait_for() {
+  local tries=$(( $1 * 10 ))
+  shift
+  until "$@"; do
+    (( --tries > 0 )) || return 1
+    nap 10
+  done
+}
+server_up() { h workspace list >/dev/null 2>&1 }
+server_down() { ! server_up }
+alive() { kill -0 $1 2>/dev/null }
+gone() { ! kill -0 $1 2>/dev/null }
+attaches() { local -a found=($work/attach.*(N)); (( $#found >= $1 )) }
+tab_total() { h workspace list 2>/dev/null | jq '[.result.workspaces[].tab_count] | add // 0' }
+split_nul() { local raw; raw=$(<$2); set -A $1 "${(@ps:\0:)raw}" }
+
+cleanup() {
+  h server stop >/dev/null 2>&1
+  wait_for 5 server_down
+  $herdr session delete $session >/dev/null 2>&1
+  rm -rf -- $work
+  rm -f -- $launch_dir/$session.*(N)
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# Stand-in agent: records what it got, then stays up a while
+cat >$work/agent <<'EOF'
+#!/bin/zsh -f
+out=$HERDR_AGENT_CHECK_OUT
+/usr/bin/env -0 >$out/agent.env
+print -rN -- "$@" >$out/agent.args
+print -r -- $$ >$out/agent.pid
+$out/inside-probe $HERDR_AGENT_CHECK_LAUNCHER $out/agent.inside
+: >$out/agent.started
+sleep 8
+EOF
+
+# Asks the launcher whether the caller is inside herdr, and writes yes or no
+cat >$work/inside-probe <<'EOF'
+#!/bin/zsh -f
+eval "$(sed '/^case \$invoked in/,$d' $1)"
+if inside_herdr; then print -r -- yes; else print -r -- no; fi >$2
+EOF
+
+# Stand-in attach: records its arguments, then stays up like a viewer would
+cat >$work/attach <<'EOF'
+#!/bin/zsh -f
+print -rN -- "$@" >$HERDR_AGENT_CHECK_OUT/attach.$$
+sleep 3
+EOF
+
+# Prints the launcher's cmux restart entries, one per line
+cat >$work/entry-probe <<'EOF'
+#!/bin/zsh -f
+eval "$(sed '/^case \$invoked in/,$d' $1)"
+restart_entries
+EOF
+
+# Asks the launcher to route one agent's hooks, and prints where they ended up pointing.
+# The launcher finds its own shim through `self=${0:A}`, so $0 has to be the launcher, not this
+cat >$work/hooks-probe <<'EOF'
+#!/bin/zsh -f
+launcher=$1 agent=$2
+0=$launcher
+eval "$(sed '/^case \$invoked in/,$d' $launcher)"
+route_hooks $agent
+print -r -- "${CMUX_CLAUDE_HOOK_CMUX_BIN:-none}"$'\t'"${HERDR_AGENT_CMUX_BIN:-none}"
+EOF
+
+# Stands in for cmux in the hook shim's tests: prints what the shim passed it
+cat >$work/fake-cmux <<'EOF'
+#!/bin/zsh -f
+print -r -- "${CMUX_CLAUDE_PID:-none} ${CMUX_CODEX_PID:-none} ${CMUX_PI_PID:-none} ${CMUX_SURFACE_ID:-none} ${CMUX_WORKSPACE_ID:-none} $*"
+EOF
+
+# Prints the launch cmux would record for `<agent> <args...>`: kind, program, arguments
+cat >$work/claim-probe <<'EOF'
+#!/bin/zsh -f
+eval "$(sed '/^case \$invoked in/,$d' $1)"
+shift
+claim_launch "$@"
+print -r -- "${CMUX_AGENT_LAUNCH_KIND:-}"
+print -r -- "${CMUX_AGENT_LAUNCH_EXECUTABLE:-}"
+print -r -- "${CMUX_AGENT_LAUNCH_ARGV_B64:-}"
+EOF
+chmod 700 $work/agent $work/attach $work/inside-probe $work/entry-probe $work/claim-probe $work/fake-cmux $work/hooks-probe
+
+export HERDR_AGENT=on HERDR_AGENT_SESSION=$session HERDR_AGENT_CHECK_OUT=$work
+# the cmux pi's hooks would call; the launcher must leave it pointing here, not at the shim
+export CMUX_PI_CMUX_BIN=$work/fake-cmux
+export HERDR_AGENT_CHECK_LAUNCHER=$launcher
+# the check's own switch and tab notes, under a made-up cmux tab ID
+export HERDR_AGENT_STATE_DIR=$work/state CMUX_SURFACE_ID=C0FFEE00-0000-4000-8000-00000000000C
+export HERDR_AGENT_CHECK_AGENT=$work/agent HERDR_AGENT_ATTACH=$work/attach
+export HERDR_AGENT_CHECK_JSON='{"hooks":{"Stop":[{"command":"\"${X:-cmux}\" hooks"}]},"q":"it'\''s"}'
+export HERDR_AGENT_CHECK_LINES=$'line one\nline two'
+args=('a b' "it's" $'x\ny' '' '--flag=v')
+
+print -r -- "herdr-agent check (throwaway session $session)"
+
+# 0. the argument rules, run against the launcher's own functions
+rule_misses=$(
+  eval "$(sed '/^case \$invoked in/,$d' $launcher)"
+  t() {
+    local want=$1 got
+    shift
+    if wants_herdr "$@"; then got=herdr; else got=here; fi
+    [[ $got == $want ]] || print -r -- "$* -> $got, not $want"
+  }
+  r() {
+    local want=$1 got
+    shift
+    got=$(resume_id "$@")
+    [[ $got == "$want" ]] || print -r -- "$* resumes '$got', not '$want'"
+  }
+  t herdr claude
+  t herdr claude "fix it"
+  t herdr claude --settings '{"a":[1]}' --session-id x
+  t herdr claude --resume abc
+  t here claude -p x
+  t here claude -r abc -p q
+  t here claude "explain" -p
+  t here claude -c "fix it" -p
+  t here claude mcp list
+  t here claude --version
+  t here claude --bg task
+  t herdr codex
+  t herdr codex -c a=b --enable hooks --dangerously-bypass-hook-trust resume x
+  t herdr codex -p profile "prompt"
+  t here codex exec x
+  t here codex resume --help
+  t here codex review
+  t herdr pi
+  t herdr pi --mode text
+  t here pi -p hi
+  t here pi q -p
+  t here pi --mode rpc
+  t here pi install x
+  t herdr agy
+  t herdr agy -add-dir /x
+  t herdr agy "task" -p
+  t here agy -p hi
+  t here agy models
+  r abc claude --resume abc
+  r abc claude --model opus -r abc
+  r '' claude --resume abc --fork-session
+  r x codex -c a=b resume x
+  r '' codex resume --last
+  r abc pi --session abc
+  r '' pi --fork abc
+  r c1 agy -conversation=c1
+  r '' agy "task" --conversation c1
+  # what a restore runs when the tab's pane is gone
+  s() {
+    local want=$1 got
+    shift
+    if resume_argv_for "$@"; then got="${resume_argv[*]}"; else got=none; fi
+    [[ $got == ${~want} ]] || print -r -- "a gone $1 pane with session '$2' starts '$got', not '$want'"
+  }
+  s 'claude --resume abc' claude abc
+  s 'codex resume 01a0' codex 01a0
+  s '*/pi --session /p/s.jsonl' pi /p/s.jsonl
+  s '*/agy --conversation c1' agy c1
+  s none claude ''
+  s none shell abc
+  # the program cmux records, and replays in this tab after a restart
+  c() {
+    local want=$1 agent=$2 got
+    shift 2
+    got=$(
+      unset CMUX_AGENT_LAUNCH_KIND CMUX_AGENT_LAUNCH_EXECUTABLE CMUX_AGENT_LAUNCH_ARGV_B64
+      claim_launch $agent "$@"
+      print -r -- "${CMUX_AGENT_LAUNCH_KIND:-none} ${CMUX_AGENT_LAUNCH_EXECUTABLE:-none}"
+    )
+    [[ $got == ${~want} ]] || print -r -- "a $agent launch is recorded as '$got', not '$want'"
+  }
+  c 'pi */bin/pi' pi --session x
+  c 'antigravity */bin/agy' agy
+  c 'none none' claude
+  c 'none none' codex resume x
+  kept=$(
+    export CMUX_AGENT_LAUNCH_KIND=pi CMUX_AGENT_LAUNCH_ARGV_B64=cmuxs CMUX_AGENT_LAUNCH_EXECUTABLE=/real/pi
+    claim_launch pi
+    print -r -- $CMUX_AGENT_LAUNCH_EXECUTABLE
+  )
+  [[ $kept == /real/pi ]] || print -r -- "a launch cmux already recorded became '$kept'"
+)
+if [[ -z $rule_misses ]]; then
+  pass "the argument rules send launches and resumes where they belong"
+else
+  for miss in ${(f)rule_misses}; do fail "argument rule: $miss"; done
+fi
+
+# 0b. `claude --resume <name>`: a saved name picks out its one conversation
+name_misses=$(
+  eval "$(sed '/^case \$invoked in/,$d' $launcher)"
+  mkdir -p $work/named-folder && cd $work/named-folder || exit
+  export CLAUDE_CONFIG_DIR=$work/claude-config
+  projects=$CLAUDE_CONFIG_DIR/projects/${${PWD:A}//[^A-Za-z0-9]/-}
+  mkdir -p $projects
+  named() {
+    print -r -- "{\"type\":\"custom-title\",\"customTitle\":\"$2\",\"sessionId\":\"${1:t:r}\"}" >>$1
+  }
+  named $projects/aaaa1111.jsonl 'alpha one'
+  print -r -- '{"type":"user"}' >>$projects/aaaa1111.jsonl
+  named $projects/aaaa1111.jsonl 'alpha renamed'
+  named $projects/bbbb2222.jsonl 'beta'
+  named $projects/cccc3333.jsonl 'Beta two'
+  print -r -- '{"type":"user"}' >$projects/dddd4444.jsonl
+  n() {
+    local want=$1 got
+    got=$(claude_named_session $2)
+    [[ $got == "$want" ]] || print -r -- "${3:-}'$2' names '$got', not '$want'"
+  }
+  cases() {
+    n aaaa1111 renamed $1
+    n '' 'alpha one' $1        # only a conversation's latest name counts
+    n aaaa1111 ALPHA $1
+    n '' beta $1               # two conversations match
+    n cccc3333 two $1
+    n '' nothing $1
+  }
+  cases
+  # again without rg, through grep
+  mkdir -p $work/jq-only && ln -sf ${commands[jq]} $work/jq-only/jq
+  path=(/usr/bin /bin $work/jq-only)
+  cases 'without rg: '
+)
+if [[ -z $name_misses ]]; then
+  pass "a saved conversation name finds its one conversation"
+else
+  for miss in ${(f)name_misses}; do fail "saved name: $miss"; done
+fi
+
+# 0c. an agent's hooks reach the tab showing its pane now, and never fail because of us
+shim_tab=C0FFEE00-0000-4000-8000-00000000000C
+shim_ws=D00D0000-0000-4000-8000-00000000000D
+mkdir -p $work/state/panes
+print -r -- "$shim_tab"$'\t'"$shim_ws"$'\t'"$$" >$work/state/panes/s1.w1:p1
+sleep 0 &
+gone_pid=$!
+wait $gone_pid
+print -r -- "$shim_tab"$'\t'"$shim_ws"$'\t'"$gone_pid" >$work/state/panes/s2.w1:p1
+shim() {
+  local session=$1 pane=$2
+  shift 2
+  HERDR_AGENT_CMUX_BIN=$work/fake-cmux HERDR_SESSION=$session HERDR_PANE_ID=$pane \
+    CMUX_CLAUDE_PID=1 CMUX_CODEX_PID=3 CMUX_PI_PID=2 CMUX_SURFACE_ID=oldtab CMUX_WORKSPACE_ID=oldws \
+    $here/hook-cmux --socket sock hooks "$@"
+}
+sh_case() {
+  local want=$1 desc=$2 got
+  shift 2
+  got=$(shim "$@")
+  if [[ $got == "$want" ]]; then pass "$desc"; else fail "$desc: cmux got '$got'"; fi
+}
+# A shim that execs itself never returns, so anything that could loop runs on a deadline:
+# without one a regression hangs the whole check instead of failing it
+bounded() {
+  local out=$1 secs=$2 child i
+  shift 2
+  ( "$@" >$out 2>&1 ) & child=$!
+  for (( i = 0; i < secs * 20; i++ )); do
+    kill -0 $child 2>/dev/null || { wait $child 2>/dev/null; return 0 }
+    sleep 0.05
+  done
+  kill -9 $child 2>/dev/null
+  wait $child 2>/dev/null
+  return 1
+}
+sh_case "$$ 3 2 $shim_tab $shim_ws --socket sock hooks claude stop" \
+  "the hook shim names the tab showing this pane" s1 w1:p1 claude stop
+sh_case "1 $$ 2 $shim_tab $shim_ws --socket sock hooks codex stop" \
+  "the hook shim sets each agent's own process variable" s1 w1:p1 codex stop
+# claude sends 3 of its 12 hooks as `hooks feed --source claude`, not `hooks claude <event>`
+sh_case "$$ 3 2 $shim_tab $shim_ws --socket sock hooks feed --source claude" \
+  "a feed hook names its agent through --source" s1 w1:p1 feed --source claude
+# pi strips HERDR_* from its hook environment and sends its own --surface, so nothing here
+# can move it; these two pin that it's left alone rather than half-rewritten
+sh_case "1 3 2 oldtab oldws --socket sock hooks pi stop" \
+  "pi runs the hook unchanged: the shim cannot reach it" s1 w1:p1 pi stop
+sh_case "1 3 2 oldtab oldws --socket sock hooks feed --source pi" \
+  "a feed hook for an agent the shim doesn't route runs unchanged" s1 w1:p1 feed --source pi
+sh_case "1 3 2 oldtab oldws --socket sock hooks claude stop" \
+  "a pane with no note runs the hook unchanged" s9 w9:p9 claude stop
+sh_case "1 3 2 oldtab oldws --socket sock hooks claude stop" \
+  "a note whose tab is gone runs the hook unchanged" s2 w1:p1 claude stop
+sh_case "1 3 2 oldtab oldws --socket sock hooks bogus stop" \
+  "an agent the shim doesn't know runs the hook unchanged" s1 w1:p1 bogus stop
+# the real one is '/Applications/cmux RBF.app/Contents/Resources/bin/cmux' — the space must
+# not split it into a program and an argument
+mkdir -p "$work/shim space"
+cp $work/fake-cmux "$work/shim space/fake cmux" && chmod 700 "$work/shim space/fake cmux"
+shim_spaced=$(HERDR_AGENT_CMUX_BIN="$work/shim space/fake cmux" \
+  HERDR_SESSION=s1 HERDR_PANE_ID=w1:p1 \
+  CMUX_CLAUDE_PID=1 CMUX_CODEX_PID=3 CMUX_PI_PID=2 CMUX_SURFACE_ID=oldtab CMUX_WORKSPACE_ID=oldws \
+  $here/hook-cmux --socket sock hooks claude stop)
+if [[ $shim_spaced == "$$ 3 2 $shim_tab $shim_ws --socket sock hooks claude stop" ]]; then
+  pass "a cmux path with a space runs as one program"
+else
+  fail "a cmux path with a space runs as one program: cmux got '$shim_spaced'"
+fi
+# CMUX_BUNDLED_CLI_PATH is the one lever that would route codex's hooks here, and pointing it
+# at this shim is the obvious way to try it. Without a guard that is an endless exec loop
+mkdir -p $work/pathdir && ln -sf $work/fake-cmux $work/pathdir/cmux
+if bounded $work/selfexec.out 5 /usr/bin/env -u HERDR_AGENT_CMUX_BIN \
+  PATH=$work/pathdir:/usr/bin:/bin CMUX_BUNDLED_CLI_PATH=$here/hook-cmux \
+  HERDR_SESSION=s1 HERDR_PANE_ID=w1:p1 HERDR_AGENT_STATE_DIR=$work/state \
+  CMUX_CLAUDE_PID=1 CMUX_CODEX_PID=3 CMUX_PI_PID=2 CMUX_SURFACE_ID=oldtab CMUX_WORKSPACE_ID=oldws \
+  $here/hook-cmux --socket sock hooks claude stop; then
+  if [[ $(<$work/selfexec.out) == "$$ 3 2 $shim_tab $shim_ws --socket sock hooks claude stop" ]]; then
+    pass "a cmux naming this shim falls through to the real one instead of looping"
+  else
+    fail "a cmux naming this shim gave '$(<$work/selfexec.out)'"
+  fi
+else
+  fail "a cmux naming this shim looped: the shim exec'd itself until it was killed"
+fi
+
+# 1. cmux's claude wrapper must treat the claude link as a real program
+wrapper=${CMUX_BUNDLED_CLI_PATH:+${CMUX_BUNDLED_CLI_PATH:h}/cmux-claude-wrapper}
+if [[ ! -r ${wrapper:-} ]]; then
+  wrappers=(/Applications/cmux*.app/Contents/Resources/bin/cmux-claude-wrapper(N))
+  wrapper=${wrappers[1]:-}
+fi
+if [[ -r $wrapper ]]; then
+  shim_test=$(sed -n \
+    -e '/^cmux_claude_wrapper_is_self_or_shim()/,/^}/p' \
+    -e '/^cmux_claude_wrapper_target_looks_like_reexec_shim()/,/^}/p' $wrapper)
+  if [[ $shim_test != *looks_like_reexec_shim* ]]; then
+    skip "couldn't read cmux's shim test from $wrapper"
+  elif /bin/bash -c "$shim_test"$'\ncmux_claude_wrapper_target_looks_like_reexec_shim "$1"' check $links/claude; then
+    fail "cmux's claude wrapper takes $links/claude for a shim"
+  else
+    pass "cmux's claude wrapper treats the claude link as a real program"
+  fi
+else
+  skip "cmux's claude wrapper not found"
+fi
+
+# 2. launch from a terminal, then hang that terminal up
+sleep 60 | /usr/bin/script -q /dev/null $links/pi "${args[@]}" >$work/tty1.log 2>&1 &
+first_tty=$!
+if ! wait_for 30 attaches 1; then
+  fail "the launcher never reached the attach step"
+  print -r -- "        terminal said: $(tr -d '\r' <$work/tty1.log | tail -3)"
+  exit 1
+fi
+first_attach=($work/attach.*(N))
+launcher_pid=${${first_attach[1]:t}#attach.}
+if ! wait_for 20 test -e $work/agent.started; then
+  fail "the agent never started in herdr"
+  exit 1
+fi
+agent_pid=$(<$work/agent.pid)
+kill -HUP -- -$launcher_pid 2>/dev/null
+kill $first_tty 2>/dev/null
+nap 150
+if server_up; then pass "the server survived the terminal hanging up"; else fail "the server died with the terminal"; fi
+own_nice=${$(ps -o ni= -p $$)// /}
+server_nice=$(ps -axo ni=,command= | awk -v s="--session $session server" 'index($0, s) { print $1; exit }')
+if [[ -n $server_nice && $server_nice == "$own_nice" ]]; then
+  pass "the server runs at this terminal's priority"
+else
+  fail "the server runs at nice ${server_nice:-unknown}, this terminal at $own_nice"
+fi
+if alive $agent_pid; then pass "the agent survived the terminal hanging up"; else fail "the agent died with the terminal"; fi
+leftovers=($launch_dir/$session.*(N))
+if (( $#leftovers == 0 )); then pass "the launch file deleted itself"; else fail "a launch file was left behind"; fi
+
+# 3. the agent got this environment, these arguments and the pane's herdr variables
+typeset -A got
+split_nul env_entries $work/agent.env
+for entry in $env_entries; do
+  [[ $entry == *=* ]] && got[${entry%%=*}]=${entry#*=}
+done
+for var in HERDR_AGENT_CHECK_JSON HERDR_AGENT_CHECK_LINES PATH HOME; do
+  if [[ ${got[$var]-} == "${(P)var}" ]]; then pass "$var arrived unchanged"; else fail "$var changed on the way"; fi
+done
+if [[ ${got[HERDR_ENV]-} == 1 && -n ${got[HERDR_PANE_ID]-} && -n ${got[HERDR_SOCKET_PATH]-} ]]; then
+  pass "the pane's herdr variables are set"
+else
+  fail "the pane's herdr variables are missing"
+fi
+if [[ $(<$work/agent.inside) == yes ]]; then
+  pass "the agent's pane counts as inside herdr"
+else
+  fail "the agent's pane doesn't count as inside herdr"
+fi
+# an app started from a herdr pane passes herdr's variables to terminals outside it
+HERDR_ENV=1 HERDR_PANE_ID=w9:p9 perl -MPOSIX -e \
+  'exit if fork; setsid(); exit if fork; select(undef, undef, undef, 0.3); exec @ARGV' \
+  $work/inside-probe $launcher $work/stale.inside
+if wait_for 10 test -s $work/stale.inside && [[ $(<$work/stale.inside) == no ]]; then
+  pass "herdr's variables alone don't count as inside herdr"
+else
+  fail "a process outside herdr counted as inside it, from herdr's variables alone"
+fi
+if (( ! ${+got[HERDR_AGENT_LAUNCH]} )); then
+  pass "HERDR_AGENT_LAUNCH didn't leak into the agent"
+else
+  fail "HERDR_AGENT_LAUNCH leaked into the agent"
+fi
+# cmux replays this program after a restart: it has to be the link, not the real pi,
+# or the restart runs pi in the tab beside the one still running in herdr
+if [[ ${got[CMUX_AGENT_LAUNCH_KIND]-} == pi && ${got[CMUX_AGENT_LAUNCH_EXECUTABLE]-} == "$links/pi" &&
+  ${got[CMUX_AGENT_LAUNCH_ARGV_B64]-} == "$(print -rN -- $links/pi "${args[@]}" | base64 | tr -d '\n')" &&
+  ${got[CMUX_AGENT_LAUNCH_CWD]-} == "$PWD" ]]; then
+  pass "cmux records the launch as this launcher's pi link"
+else
+  fail "cmux records the launch as ${got[CMUX_AGENT_LAUNCH_EXECUTABLE]-none} (kind ${got[CMUX_AGENT_LAUNCH_KIND]-none})"
+fi
+# pi resolves its own tab and strips HERDR_* from the environment it spawns hooks with, so the
+# launcher must leave it alone rather than spend a process per hook on a shim that can't help
+if [[ ${got[CMUX_PI_CMUX_BIN]-} == "$work/fake-cmux" ]] && (( ! ${+got[HERDR_AGENT_CMUX_BIN]} )); then
+  pass "pi's hooks are left alone: the shim can't move them"
+else
+  fail "pi's hooks were pointed at ${got[CMUX_PI_CMUX_BIN]-none}"
+fi
+# claude is the one agent the shim can move, so prove the launcher wires it and keeps a real
+# cmux for the shim to call. route_hooks is called directly: no claude is launched here
+want_hooked="$here/hook-cmux"$'\t'"$work/fake-cmux"
+# cmux names the cmux for claude's hooks; the launcher steps in front of whichever it set
+hooked=$(CMUX_CLAUDE_HOOK_CMUX_BIN=$work/fake-cmux $work/hooks-probe $launcher claude)
+if [[ $hooked == $want_hooked ]]; then
+  pass "claude's hooks run through the shim, which keeps the real cmux to call"
+else
+  fail "claude's hooks point at ${hooked%%$'\t'*}, with cmux ${hooked##*$'\t'}"
+fi
+# and with nothing but the bundled path to go on, it falls back to that
+hooked=$(/usr/bin/env -u CMUX_CLAUDE_HOOK_CMUX_BIN \
+  CMUX_BUNDLED_CLI_PATH=$work/fake-cmux $work/hooks-probe $launcher claude)
+if [[ $hooked == $want_hooked ]]; then
+  pass "with no cmux named for the hooks, the shim falls back to the bundled one"
+else
+  fail "the bundled cmux fallback gave ${hooked%%$'\t'*}, with cmux ${hooked##*$'\t'}"
+fi
+split_nul received $work/agent.args
+received=("${(@)received[1,-2]}")
+if [[ "${(j:|:)${(@qqqq)received}}" == "${(j:|:)${(@qqqq)args}}" ]]; then
+  pass "the arguments arrived unchanged"
+else
+  fail "the arguments changed: ${(@qqqq)received}"
+fi
+split_nul attach_args ${first_attach[1]}
+if [[ ${attach_args[1]} == "$session" && -n ${attach_args[2]} && -n ${attach_args[3]} ]]; then
+  pass "the attach step got the session, terminal and pane"
+else
+  fail "the attach step got: ${attach_args[*]}"
+fi
+first_pane=${attach_args[3]}
+
+# 3b. after a cmux restart, cmux's restart command brings this tab's pane back
+# the note the agent's hooks read, written by the attach that showed this pane
+pane_note=$work/state/panes/$session.$first_pane
+if [[ -f $pane_note ]] && IFS=$'\t' read -r note_tab note_ws note_pid <$pane_note &&
+  [[ $note_tab == "$CMUX_SURFACE_ID" && $note_pid == "$launcher_pid" ]]; then
+  pass "the launcher noted which tab shows this pane, for the agent's hooks"
+else
+  fail "the pane note is missing or wrong: $(tr '\t' '|' <$pane_note 2>&1)"
+fi
+
+# one entry cmux can't use makes it ignore the whole file, the user's own entries too
+# (cmux-rbf: Packages/macOS/CmuxRestartCommands/.../RestartCommandDefinition.swift)
+entry=$($work/entry-probe $launcher)
+if print -r -- $entry | jq -se '
+  length == 2 and all(
+    (keys == ["command", "cwd", "id", "match"])
+    and (.id | test("^[a-z0-9][a-z0-9-]{0,31}$"))
+    and ((.match | keys) - ["argumentTailPrefix", "environment", "executable"] == [])
+    and (.match.executable | test("^[^/]+$"))
+    and ((.match.environment // {} | keys) - ["JJUI_CONFIG_DIR"] == []))
+  and (map(.id) | unique | length == 2)' >/dev/null 2>&1; then
+  pass "the cmux restart entries use only fields cmux accepts"
+else
+  fail "cmux would reject a restart entry, and the rest of the file with it: $entry"
+fi
+# both entries match the same process name, so only their first arguments keep a
+# local attach and a remote one apart; a process matching both would be ambiguous
+if print -r -- $entry | jq -se '
+  (map(.match.executable) | unique | length == 1)
+  and (map(.match.argumentTailPrefix) | sort == [["--remote"], ["--session"]])' >/dev/null 2>&1; then
+  pass "the local and remote restart entries can't both match one tab"
+else
+  fail "the restart entries overlap or disagree on the process name: $entry"
+fi
+# cmux matches the tab's process by the name it runs under (a real attach needs a
+# terminal with a size; script's has none)
+exe=$(print -r -- $entry | jq -sr '.[0].match.executable')
+sleep 3 | HERDR_AGENT_ATTACH= /usr/bin/script -q /dev/null /bin/zsh -fc \
+  'stty rows 24 cols 80; exec "$@"' sized $launcher attach $session $first_pane \
+  >$work/real-attach.log 2>&1 &
+if wait_for 5 /usr/bin/pgrep -qf "^$exe --session $session terminal attach "; then
+  pass "a real attach runs herdr under the name the restart entry matches ($exe)"
+else
+  fail "no herdr attach runs as $exe: $(tr -d '\r' <$work/real-attach.log | tail -2)"
+fi
+tab_note=$work/state/tabs/$CMUX_SURFACE_ID
+if [[ -f $tab_note ]] && IFS=$'\t' read -r note_session note_pane _ <$tab_note &&
+  [[ $note_session == "$session" && $note_pane == "$first_pane" ]]; then
+  pass "the launcher noted which pane this tab shows"
+else
+  fail "the tab note is missing or wrong: $(tr '\t' '|' <$tab_note 2>&1)"
+fi
+sleep 5 | /usr/bin/script -q /dev/null $launcher attach --restore >$work/restore.log 2>&1 &
+if wait_for 10 attaches 2; then
+  restore_attach=($work/attach.*(Nom[1]))
+  split_nul restore_args $restore_attach
+  if [[ ${restore_args[1]} == "$session" && ${restore_args[2]} == "${attach_args[2]}" &&
+    ${restore_args[3]} == "$first_pane" ]]; then
+    pass "a restore reattaches the noted pane"
+  else
+    fail "a restore attached to: ${restore_args[*]}"
+  fi
+else
+  fail "a restore never reached the attach step: $(tr -d '\r' <$work/restore.log | tail -2)"
+fi
+if sleep 3 | CMUX_SURFACE_ID=C0FFEE00-0000-4000-8000-0000000000FF /usr/bin/script -q /dev/null \
+  $launcher attach --restore 2>&1 | /usr/bin/grep -q 'no saved herdr pane'; then
+  pass "a tab with no note is refused with a reason"
+else
+  fail "a tab with no note wasn't refused"
+fi
+
+# 3c. a tab running a remote herdr comes back after a cmux restart. Two stand-ins, because
+# no single one shows both things:
+#   remote-bin/herdr   is `yes`: a real program, so it keeps the name it runs under and
+#                      stays up on any arguments. It rewrites its own argument memory,
+#                      though, so only the name and the first argument can be read back.
+#                      That's what cmux matches on
+#   remote-args/herdr  a script that records its arguments exactly. A script loses the
+#                      name it's run under, which is what yes is for
+mkdir -p $work/remote-bin $work/remote-args && ln -sf /usr/bin/yes $work/remote-bin/herdr
+cat >$work/remote-args/herdr <<'EOF'
+#!/bin/zsh -f
+print -rN -- "$@" >$HERDR_AGENT_CHECK_OUT/remote.args
+EOF
+chmod 700 $work/remote-args/herdr
+remote_tab=C0FFEE00-0000-4000-8000-0000000000AA
+remote_args=(--remote home.test --remote-keybindings server)
+remote_note=$work/state/tabs/$remote_tab
+# runs the launcher in a cmux tab, in a terminal (attach --restore wants one), with a
+# stand-in herdr first on PATH: remote_run <tab> <on|off> <stand-in dir> <launcher args>
+remote_run() {
+  local tab=$1 switch=$2 bin=$3
+  shift 3
+  sleep 4 | PATH=$bin:$PATH CMUX_SURFACE_ID=$tab HERDR_AGENT=$switch \
+    /usr/bin/script -q /dev/null $launcher "$@" >/dev/null 2>&1 &
+  remote_pid=$!
+}
+# by parent, not by pattern: a pattern can miss yes's rewritten arguments (and hang the
+# wait), or hit a real `herdr --remote` running elsewhere
+remote_stop() { /usr/bin/pkill -P $remote_pid 2>/dev/null; kill $remote_pid 2>/dev/null; wait $remote_pid 2>/dev/null }
+remote_running_as() { /usr/bin/pgrep -qf "^$1 --remote[^-]" }
+# the arguments the recorder got, into remote_got
+remote_recorded() {
+  rm -f $work/remote.args
+  remote_run $1 on $work/remote-args "${@[2,-1]}"
+  wait $remote_pid 2>/dev/null
+  remote_got=()
+  [[ -f $work/remote.args ]] && split_nul remote_got $work/remote.args && remote_got=("${(@)remote_got[1,-2]}")
+}
+
+remote_run $remote_tab on $work/remote-bin attach $remote_args
+if wait_for 5 remote_running_as $exe; then
+  pass "a remote herdr runs under the name the -remote restart entry matches"
+else
+  fail "no remote herdr runs as $exe $remote_args: $(/usr/bin/pgrep -lf 'home\.test')"
+fi
+remote_stop
+if [[ -f $remote_note && $(<$remote_note) == "${(pj:\t:)remote_args}" ]]; then
+  pass "the launcher noted what the remote tab ran"
+else
+  fail "the remote tab note is missing or wrong: $(tr '\t' '|' <$remote_note 2>&1)"
+fi
+remote_run $remote_tab on $work/remote-bin attach --restore
+if wait_for 5 remote_running_as $exe; then
+  pass "a restore runs the noted remote herdr again"
+else
+  fail "a restore didn't run the remote herdr: $(/usr/bin/pgrep -lf 'home\.test')"
+fi
+remote_stop
+remote_recorded $remote_tab attach $remote_args
+first_got=("${remote_got[@]}")
+remote_recorded $remote_tab attach --restore
+if [[ "${(j:|:)${(@qqqq)first_got}}" == "${(j:|:)${(@qqqq)remote_args}}" &&
+  "${(j:|:)${(@qqqq)remote_got}}" == "${(j:|:)${(@qqqq)remote_args}}" ]]; then
+  pass "the remote herdr gets its arguments unchanged, first time and after a restore"
+else
+  fail "remote herdr arguments: first ${(@qqqq)first_got}, after a restore ${(@qqqq)remote_got}"
+fi
+# switched off there's no tab to bring back: plain herdr, and nothing noted
+off_tab=C0FFEE00-0000-4000-8000-0000000000AB
+remote_run $off_tab off $work/remote-bin attach $remote_args
+if wait_for 5 remote_running_as "$work/remote-bin/herdr" && [[ ! -e $work/state/tabs/$off_tab ]]; then
+  pass "switched off, a remote herdr runs as itself and notes nothing"
+else
+  fail "switched off, the remote herdr ran as: $(/usr/bin/pgrep -lf 'home\.test'); note: $(ls $work/state/tabs/$off_tab 2>&1)"
+fi
+remote_stop
+
+# 4. the pane closes when the agent exits
+if wait_for 30 gone $agent_pid; then
+  nap 100
+  if h pane get $first_pane 2>/dev/null | jq -e '.result' >/dev/null 2>&1; then
+    fail "the agent's pane stayed open after it exited"
+  else
+    pass "the agent's pane closed when it exited"
+  fi
+else
+  fail "the agent didn't exit"
+fi
+
+# 5. with a real claude, resuming its running session attaches instead of starting a copy
+# (launched as from a plain terminal: no stand-in, no cmux, not nested in another Claude;
+# always on Haiku, since test sessions never run on an expensive model)
+real_claude() {
+  sleep 90 | (
+    unset HERDR_AGENT_CHECK_AGENT \
+      ${(k)parameters[(I)CMUX_*]} ${${(k)parameters[(I)(CLAUDECODE|CLAUDE_CODE_*|CLAUDE_PID)]}:#CLAUDE_CODE_NO_FLICKER}
+    exec /usr/bin/script -q /dev/null $links/claude --model haiku "$@"
+  ) >>$work/claude-tty.log 2>&1 &
+}
+claude_reported() {
+  claude_row=$(h agent list 2>/dev/null | jq -c --arg id $claude_id \
+    'first(.result.agents[] | select(.agent_session.value? == $id) | {terminal_id, pane_id})' 2>/dev/null)
+  [[ -n $claude_row ]]
+}
+if (( ! with_claude )); then
+  skip "resuming a running session needs a real agent: herdr-agent check --with-claude"
+else
+  claude_id=${(L)$(uuidgen)}
+  claude_row=
+  rm -f -- $work/attach.*(N)
+  real_claude --session-id $claude_id
+  if wait_for 45 claude_reported; then
+    pass "claude started in herdr and reported its session"
+    claude_terminal=$(jq -r .terminal_id <<<$claude_row)
+    tabs_before=$(tab_total)
+    real_claude --resume $claude_id
+    if wait_for 20 attaches 2; then
+      same=1
+      for f in $work/attach.*(N); do
+        split_nul attach_args $f
+        [[ ${attach_args[2]} == "$claude_terminal" ]] || same=0
+      done
+      if (( same )); then
+        pass "resuming claude's session attached to the running claude"
+      else
+        fail "resuming claude's session attached somewhere else"
+      fi
+      if [[ $(tab_total) == "$tabs_before" ]]; then
+        pass "the resume didn't open another tab"
+      else
+        fail "the resume opened another tab"
+      fi
+    else
+      fail "the resume never reached the attach step"
+    fi
+  else
+    fail "claude never reported its session; run the check from a folder Claude already trusts"
+  fi
+fi
+
+print
+if (( failures )); then
+  print -r -- "herdr-agent check: $failures failed"
+  exit 1
+fi
+print -r -- "herdr-agent check: all passed"
