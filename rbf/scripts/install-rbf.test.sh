@@ -1,15 +1,23 @@
 #!/bin/bash
 
-# Isolated harness for rbf/scripts/install-rbf.sh (hrdr-5 Scenarios 2–10, 12, 13, 15–18).
+# Isolated harness for rbf/scripts/install-rbf.sh (hrdr-5 Scenarios 2–10, 12, 13, 15–18;
+# hrdr-9 Scenarios 4–16, 20, 21, 23–25 for herdr-agent).
 #
 #   rbf/scripts/install-rbf.test.sh <case>
 #   cases: dry-run install hosting failed-handoff interrupted-handoff classify rollback refusals first-install
 #          path-shadow alt-screen attached-window wedged real-agent busy-shell
+#          herdr-agent-install herdr-agent-only herdr-agent-rollback herdr-agent-no-previous herdr-agent-no-gap
+#          herdr-agent-refuse herdr-agent-same-build herdr-agent-after-build herdr-agent-interrupted
+#          herdr-agent-first-install herdr-agent-no-relink herdr-agent-offline herdr-agent-first-rollback
+#          herdr-agent-exit-3 herdr-agent-interrupted-plain herdr-agent-undo herdr-agent-previous-fails
 #
-# Each case gets its own HOME and XDG dirs under <root>/<case> (short, so socket paths
-# stay under macOS's 104 bytes), starts headless sessions from an "old" exec wrapper
-# around the build under test, and refuses any socket outside that base. Your real
-# sessions and ~/.local/bin are never touched.
+# herdr-agent-after-build, herdr-agent-exit-3 and herdr-agent-interrupted-plain start real
+# sessions, so they need target/release/herdr built; the other herdr-agent cases don't.
+#
+# Each case gets its own HOME and XDG dirs under <root>/<case>, or <root>/ha-* for the
+# herdr-agent-* cases (short, so socket paths stay under macOS's 104 bytes), starts
+# headless sessions from an "old" exec wrapper around the build under test, and refuses
+# any socket outside that base. Your real sessions and ~/.local are never touched.
 #
 # <root> is $RBF_TEST_ROOT, else $EXTERNAL_DRIVE/tmp/rbf-h. A root on a volume under
 # /Volumes must be mounted, so a case never writes onto the boot disk in its place.
@@ -26,13 +34,20 @@ ROOT="${RBF_TEST_ROOT:-${EXTERNAL_DRIVE:+$EXTERNAL_DRIVE/tmp/rbf-h}}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL="$REPO/rbf/scripts/install-rbf.sh"
 BUILD="$REPO/target/release/herdr"
-BASE="$ROOT/$CASE"
+# herdr-agent-* cases live under ha-*: a live handoff's socket path must stay under 104 bytes
+case "$CASE" in herdr-agent-*) BASE="$ROOT/ha-${CASE#herdr-agent-}" ;; *) BASE="$ROOT/$CASE" ;; esac
 BIN_DIR="$BASE/.local/bin"
 TARGET="$BIN_DIR/herdr"
 PREVIOUS="$BIN_DIR/herdr.previous"
 OLD="$BASE/old-herdr"
 CONFIG_DIR="$BASE/.config/herdr"
 LOG="$BASE/Library/Logs/herdr-rbf-install.log"
+SHARE_DIR="$BASE/.local/share"
+HA_BIN="$BIN_DIR/herdr-agent"
+HA_PREV="$BIN_DIR/herdr-agent.previous"
+HA_SHARE="$SHARE_DIR/herdr-agent"
+HA_SHARE_PREV="$SHARE_DIR/herdr-agent.previous"
+HA_SRC_REPO="$REPO/rbf/src/herdr-agent"
 PYTHON_DIR="$(dirname "$(command -v python3)")"
 JJ_DIR="$(dirname "$(command -v jj 2>/dev/null || printf '/usr/bin/jj')")"
 TEST_PATH="$BIN_DIR:$PYTHON_DIR:$JJ_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -182,6 +197,12 @@ setup() {
   mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$BASE/state" "$BASE/run" "$BASE/vars" "$BASE/work"
   printf 'onboarding = false\n\n[update]\nversion_check = false\n' > "$CONFIG_DIR/config.toml"
   : > "$BASE/.zshrc"
+  # cmux's restart entries as herdr-agent writes them, so the install's restart-entry
+  # step finds them present and never reads a cmux app in /Applications
+  mkdir -p "$BASE/.config/cmux"
+  # shellcheck disable=SC2016  # evaluated by zsh
+  HOME="$BASE" /bin/zsh -f -c '0=$1; eval "$(sed "/^case \\\$invoked in/,\$d" "$1")"; restart_entries' \
+    ha "$HA_SRC_REPO/bin/herdr-agent" | jq -s '{definitions: .}' > "$BASE/.config/cmux/restart-commands.json"
   # Same behavior as the build, different bytes
   printf '#!/bin/sh\nexec "%s" "$@"\n' "$BUILD" > "$OLD"
   chmod +x "$OLD"
@@ -282,11 +303,13 @@ cleanup() {
 # Cases
 # ---------------------------------------------------------------------------
 
+# shellcheck disable=SC2016  # conditions are evaluated by check
 case_dry_run() {
   install_old
   start_sessions default work
-  local before out="$BASE/dry-run.err" rc
+  local before out="$BASE/dry-run.err" rc home_before
   before="$(bin_snapshot)"
+  home_before="$(home_snapshot)"
   run_install "$out" -- --dry-run
   rc=$?
   check "exit 0" [ "$rc" -eq 0 ]
@@ -304,6 +327,37 @@ case_dry_run() {
   out="$BASE/dry-run-no-path.err"
   isolated_env PATH="$PYTHON_DIR:$JJ_DIR:/usr/bin:/bin:/usr/sbin:/sbin" RBF_INSTALL_PREBUILT="$BUILD" "$INSTALL" --dry-run > "$out.stdout" 2> "$out"
   check "PATH warning when ~/.local/bin is missing from PATH" has "$out" "⚠ ~/.local/bin is not on PATH; typing herdr won't find this install"
+
+  # hrdr-9 Scenario 16: herdr-agent in both plans, and nothing written under HOME
+  out="$BASE/dry-run.err"
+  check "plan: herdr-agent source" has "$out" "  herdr-agent    from      rbf/src/herdr-agent"
+  check "plan: herdr-agent launcher" has "$out" "                 to        $HA_BIN"
+  check "plan: herdr-agent tree" has "$out" "                           $HA_SHARE"
+  check "plan: herdr-agent previous" has "$out" "                 previous  none (first install)"
+  check "plan: cmux restart entries" has "$out" "                 cmux      restart entries present"
+  check "plan: herdr-agent rows between herdr's previous and sessions" eval \
+    '[ "$(grep -n "  herdr-agent    from" "$out" | cut -d: -f1)" -gt "$(grep -n "  previous       " "$out" | cut -d: -f1)" ] &&
+     [ "$(grep -n "  herdr-agent    from" "$out" | cut -d: -f1)" -lt "$(grep -n "  sessions       " "$out" | cut -d: -f1)" ]'
+  check "plan: never the timestamped tree" has_not "$out" "herdr-agent@"
+  out="$BASE/dry-run-herdr-agent.err"
+  run_install "$out" -- --herdr-agent --dry-run
+  rc=$?
+  check "--herdr-agent --dry-run: exit 0" [ "$rc" -eq 0 ]
+  check "--herdr-agent --dry-run: heading" has "$out" "herdr-rbf install plan — herdr-agent only"
+  check "--herdr-agent --dry-run: source" has "$out" "  herdr-agent    from      rbf/src/herdr-agent"
+  check "--herdr-agent --dry-run: launcher" has "$out" "                 to        $HA_BIN"
+  check "--herdr-agent --dry-run: tree" has "$out" "                           $HA_SHARE"
+  check "--herdr-agent --dry-run: previous" has "$out" "                 previous  none (first install)"
+  check "--herdr-agent --dry-run: herdr not touched" has "$out" "  herdr          not touched; no build, no session handed off"
+  check "--herdr-agent --dry-run: no herdr rows" has_not "$out" "  install to     "
+  check "--herdr-agent --dry-run: dry run line" has "$out" "dry run — nothing built, nothing written, no session touched."
+  check "nothing under HOME's .local or cmux config changed" [ "$home_before" = "$(home_snapshot)" ]
+}
+
+home_snapshot() {
+  (cd "$BASE" && find .local .config/cmux Library -print 2> /dev/null | LC_ALL=C sort | while IFS= read -r f; do
+    if [ -L "$f" ]; then printf '%s -> %s\n' "$f" "$(readlink "$f")"; elif [ -f "$f" ]; then printf '%s %s\n' "$f" "$(cksum < "$f")"; else printf '%s\n' "$f"; fi
+  done)
 }
 
 case_install() {
@@ -315,7 +369,7 @@ case_install() {
   check "first install exit 0" [ "$rc" -eq 0 ]
   check "default handed off" has "$out" "✓ default    handed off; pane processes still running"
   check "work handed off" has "$out" "✓ work       handed off; pane processes still running"
-  check "verdict line" has "$out" "✓ installed; 2 of 2 sessions handed off"
+  check "verdict line" has "$out" "✓ installed herdr and herdr-agent; 2 of 2 sessions handed off"
   check "loops alive" loops_alive default work
   check "loops still ticking 3s later" loops_ticking default work
   check "herdr is the build" same "$TARGET" "$BUILD"
@@ -408,6 +462,13 @@ case_rollback() {
   start_sessions default work
   run_install "$BASE/install.err"
   check "setup install exit 0" [ $? -eq 0 ]
+  # herdr-agent A over the one the install put in, so a rollback that reached herdr-agent
+  # would change it (hrdr-9: --rollback never touches herdr-agent)
+  local a ha_before
+  a="$(ha_source A)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "setup: herdr-agent A installed" installed_is "$a"
+  ha_before="$(ha_state)"
 
   local watcher out="$BASE/rollback-1.err" rc
   (while :; do [ -x "$TARGET" ] || echo MISSING >> "$BASE/work/missing"; sleep 0.01; done) &
@@ -423,6 +484,8 @@ case_rollback() {
   check "work handed off" has "$out" "✓ work       handed off"
   check "loops alive" loops_alive default work
   check "herdr never missing during rollback" [ ! -e "$BASE/work/missing" ]
+  check "rollback left herdr-agent byte-identical" [ "$ha_before" = "$(ha_state)" ]
+  check "rollback output never mentions herdr-agent" has_not "$out" "herdr-agent"
 
   out="$BASE/rollback-2.err"
   run_install "$out" -- --rollback
@@ -431,6 +494,8 @@ case_rollback() {
   check "herdr is the build again" same "$TARGET" "$BUILD"
   check "herdr.previous is the old wrapper again" same "$PREVIOUS" "$OLD"
   check "loops alive after second rollback" loops_alive default work
+  check "second rollback left herdr-agent byte-identical" [ "$ha_before" = "$(ha_state)" ]
+  check "second rollback output never mentions herdr-agent" has_not "$out" "herdr-agent"
 }
 
 case_refusals() {
@@ -721,12 +786,806 @@ case_busy_shell() {
   note "after handoff: $(grep -o 'AFTER-FF-[A-Z]*' "$BASE/busy-after.txt" | tail -1), done line on screen: $(grep -c '^AFTER-DONE' "$BASE/busy-after.txt")"
 }
 
+
+# ---------------------------------------------------------------------------
+# herdr-agent (hrdr-9 Scenarios 4–16, 20, 21, 23–25)
+# ---------------------------------------------------------------------------
+
+# The installer's own seams put each case's herdr-agent source in its own copy, so
+# "A" and "B" are two copies of rbf/src/herdr-agent with a variant marker written into
+# both the launcher and the tree's hook-cmux; a broken copy has its defect written in.
+# A consistent pair is checked, not assumed: the installed launcher's own `links`,
+# evaluated with $0 set to its path, must name a tree whose hook-cmux carries the
+# launcher's marker.
+
+# ha_source <name>: a marked copy of the source, printed as its path
+ha_source() {
+  local dir="$BASE/src-$1"
+  rm -rf "$dir"
+  /bin/cp -pR "$HA_SRC_REPO" "$dir"
+  printf '# variant %s\n' "$1" >> "$dir/bin/herdr-agent"
+  printf '# variant %s\n' "$1" >> "$dir/share/herdr-agent/hook-cmux"
+  printf '%s' "$dir"
+}
+
+# ha_run <out> <source> [env assignments...] -- [args...]
+ha_run() {
+  local out="$1" src="$2"
+  shift 2
+  run_install "$out" RBF_INSTALL_HERDR_AGENT_SRC="$src" "$@"
+}
+
+ha_marker() { sed -n 's/^# variant //p' "$1" 2> /dev/null | tail -1; }
+
+# The launcher's marker and its tree's, as "launcher/tree"
+ha_pair() {
+  local links
+  # shellcheck disable=SC2016  # evaluated by zsh, with $0 set to the launcher
+  links="$(isolated_env /bin/zsh -f -c '0=$1; eval "$(sed "/^case \\\$invoked in/,\$d" "$1")"; print -r -- $links' \
+    ha "$HA_BIN" 2> /dev/null)"
+  printf '%s/%s' "$(ha_marker "$HA_BIN")" "$(ha_marker "$(dirname "$links")/hook-cmux")"
+}
+
+consistent_as() { [ "$(ha_pair)" = "$1/$1" ]; }
+
+# Every herdr-agent path this installer owns, with contents: both launchers, both
+# tree links and what's behind them, every tree, and any temporary file left behind
+ha_state() {
+  local p
+  for p in "$HA_BIN" "$HA_PREV" "$HA_SHARE" "$HA_SHARE_PREV"; do
+    if [ -L "$p" ]; then
+      printf '%s link %s\n' "${p##*/}" "$(readlink "$p")"
+    elif [ -f "$p" ]; then
+      printf '%s file %s\n' "${p##*/}" "$(cksum < "$p")"
+    elif [ -e "$p" ]; then
+      printf '%s other\n' "${p##*/}"
+    else
+      printf '%s none\n' "${p##*/}"
+    fi
+  done
+  for p in "$SHARE_DIR"/herdr-agent@*; do
+    [ -d "$p" ] || continue
+    printf 'tree %s\n' "${p##*/}"
+    tree_shape "$p"
+  done
+  find "$BIN_DIR" "$SHARE_DIR" -maxdepth 1 -name '.herdr-agent.*' 2> /dev/null | sed 's/^/temp /'
+}
+
+# Every entry under a tree: path, and a link's target or a file's checksum
+tree_shape() {
+  (cd "$1" && find . -mindepth 1 -print | LC_ALL=C sort | while IFS= read -r f; do
+    if [ -L "$f" ]; then
+      printf '  %s -> %s\n' "$f" "$(readlink "$f")"
+    elif [ -f "$f" ]; then
+      printf '  %s %s\n' "$f" "$(cksum < "$f")"
+    fi
+  done)
+}
+
+# installed_is <source>: the installed launcher and tree are that source's, byte for byte
+installed_is() {
+  [ -f "$HA_BIN" ] && [ ! -L "$HA_BIN" ] && same "$HA_BIN" "$1/bin/herdr-agent" &&
+    [ "$(tree_shape "$HA_SHARE/")" = "$(tree_shape "$1/share/herdr-agent")" ]
+}
+
+trees() { find "$SHARE_DIR" -maxdepth 1 -name 'herdr-agent@*' -type d 2> /dev/null | wc -l | tr -d ' '; }
+no_temp() { [ -z "$(find "$BIN_DIR" "$SHARE_DIR" -maxdepth 1 -name '.herdr-agent.*' 2> /dev/null)" ]; }
+herdr_sum() { cksum < "$TARGET" 2> /dev/null; }
+no_session_lines() { ! grep -q ' session ' "$LOG" 2> /dev/null; }
+
+# ha_reset: no herdr-agent at all, as on a machine that never had one
+ha_reset() {
+  rm -rf "$HA_BIN" "$HA_PREV" "$HA_SHARE" "$HA_SHARE_PREV" "$SHARE_DIR"/herdr-agent@*
+}
+
+# The pre-9.2 layout as a stand-in: a launcher that answers --help and whose install
+# links ~/.local/bin/herdr-agent to itself, with a tree beside it, both marked
+# `dotfiles`. ~/.local/bin/herdr-agent starts as a link to it
+dotfiles_layout() {
+  local dot="$BASE/dotfiles/zsh/.local" a
+  mkdir -p "$dot/bin" "$dot/share/herdr-agent/bin"
+  # shellcheck disable=SC2016  # the stand-in's own zsh
+  printf '%s\n' '#!/bin/zsh -f' '# herdr-agent stand-in for the layout before the copy-install' '# variant dotfiles' \
+    'self=${0:A}' 'invoked=${0:t}' 'links=${self:h:h}/share/herdr-agent/bin' \
+    'case $invoked in (claude|codex|pi|agy) print -r -- "stand-in $invoked"; exit 0 ;; esac' \
+    'case ${1:-} in' \
+    '  (install) mkdir -p -- $HOME/.local/bin && ln -sfn -- $self $HOME/.local/bin/herdr-agent ;;' \
+    '  (-h|--help|help) print -r -- "herdr-agent (dotfiles stand-in)" ;;' \
+    '  (*) print -ru2 -- "unknown command: $1"; exit 1 ;;' \
+    'esac' > "$dot/bin/herdr-agent"
+  printf '%s\n' '#!/bin/zsh -f' '# variant dotfiles' 'exit 0' > "$dot/share/herdr-agent/hook-cmux"
+  chmod 755 "$dot/bin/herdr-agent" "$dot/share/herdr-agent/hook-cmux"
+  for a in claude codex pi agy; do ln -s ../../../bin/herdr-agent "$dot/share/herdr-agent/bin/$a"; done
+  ln -s "$dot/bin/herdr-agent" "$HA_BIN"
+  DOT_LAUNCHER="$dot/bin/herdr-agent"
+}
+
+dotfiles_sum() { (cd "$BASE/dotfiles" && find . -print | LC_ALL=C sort | while IFS= read -r f; do
+  if [ -L "$f" ]; then printf '%s -> %s\n' "$f" "$(readlink "$f")"; elif [ -f "$f" ]; then printf '%s %s\n' "$f" "$(cksum < "$f")"; fi
+done); }
+
+# ha_background <out> [env assignments...] -- [args...]: the installer as a background
+# job whose $! is the script itself (exec), for signals
+ha_background() {
+  local out="$1"
+  shift
+  local envs=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "${1:-}" = -- ] && shift
+  (isolated_exec RBF_INSTALL_PREBUILT="$BUILD" ${envs[@]+"${envs[@]}"} "$INSTALL" "$@" > "$out.stdout" 2> "$out") &
+  HA_BG_PID=$!
+}
+
+# wait_until <tenths> <command...>
+wait_until() {
+  local n="$1"
+  shift
+  while [ "$n" -gt 0 ]; do
+    "$@" && return 0
+    sleep 0.1
+    n=$((n - 1))
+  done
+  return 1
+}
+
+staged_exists() { [ -n "$(find "$BIN_DIR" -maxdepth 1 -name '.herdr-agent.staged.*' 2> /dev/null)" ]; }
+prepared_exists() { [ -n "$(find "$BIN_DIR" -maxdepth 1 -name '.herdr-agent.prev.*' 2> /dev/null)" ]; }
+share_moved_from() { [ "$(readlink "$HA_SHARE" 2> /dev/null)" != "$1" ]; }
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_install() {
+  local a out="$BASE/ha-install.err" rc
+  a="$(ha_source A)"
+  ha_run "$out" "$a" -- --herdr-agent
+  rc=$?
+  check "exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "~/.local/bin/herdr-agent is a regular file" eval '[ -f "$HA_BIN" ] && [ ! -L "$HA_BIN" ]'
+  check "~/.local/share/herdr-agent is a link to herdr-agent@<time> ($(readlink "$HA_SHARE"))" \
+    eval 'case "$(readlink "$HA_SHARE")" in herdr-agent@*) [ -d "$HA_SHARE/" ] ;; *) false ;; esac'
+  check "bin/claude resolves to ~/.local/bin/herdr-agent" \
+    [ "$(/bin/zsh -fc 'print -r -- ${1:A}' ha "$HA_SHARE/bin/claude")" = "$(cd "$BIN_DIR" && pwd -P)/herdr-agent" ]
+  check "~/.local/bin/herdr-agent --help exits 0" eval 'isolated_env "$HA_BIN" --help > /dev/null 2>&1'
+  check "A's launcher and tree, byte for byte" installed_is "$a"
+  check "the pair is consistent (A/A; got $(ha_pair))" consistent_as A
+  check "no previous on a clean home" eval '[ ! -e "$HA_PREV" ] && [ ! -L "$HA_PREV" ] && [ ! -L "$HA_SHARE_PREV" ]'
+  check "step line" has "$out" "✓ installed herdr-agent (rbf "
+  check "summary" has "$out" "✓ installed herdr-agent; running agents keep the copy they started with"
+  check "rollback row" has "$out" "rollback     rbf/scripts/install-rbf.sh --herdr-agent --rollback"
+  check "log names the tree" grep -q ' installed herdr-agent herdr-agent@' "$LOG"
+  check "no temporary files left" no_temp
+  check "nothing on stdout" [ ! -s "$out.stdout" ]
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_only() {
+  install_old
+  local a out="$BASE/ha-only.err" rc before
+  a="$(ha_source A)"
+  printf '#!/bin/sh\ntouch "%s"\n' "$BASE/work/cargo-ran" > "$BASE/recording-cargo"
+  chmod +x "$BASE/recording-cargo"
+  before="$(herdr_sum)"
+  isolated_env RBF_INSTALL_CARGO="$BASE/recording-cargo" RBF_INSTALL_HERDR_AGENT_SRC="$a" "$INSTALL" --herdr-agent \
+    > "$out.stdout" 2> "$out"
+  rc=$?
+  check "exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "the cargo stand-in never ran" [ ! -e "$BASE/work/cargo-ran" ]
+  check "herdr byte-identical" [ "$before" = "$(herdr_sum)" ]
+  check "no herdr.previous written" [ ! -e "$PREVIOUS" ]
+  check "no session handed off (no handoff line)" has_not "$out" "handing off"
+  check "no session handed off (no session in the log)" no_session_lines
+  check "plan heading" has "$out" "herdr-rbf install plan — herdr-agent only"
+  check "plan: herdr not touched" has "$out" "  herdr          not touched; no build, no session handed off"
+  check "herdr-agent is A" installed_is "$a"
+
+  # off PATH, the warning names what this mode installs
+  out="$BASE/ha-only-no-path.err"
+  isolated_env PATH="$PYTHON_DIR:$JJ_DIR:/usr/bin:/bin:/usr/sbin:/sbin" RBF_INSTALL_HERDR_AGENT_SRC="$a" "$INSTALL" --herdr-agent --dry-run \
+    > "$out.stdout" 2> "$out"
+  check "PATH warning names herdr-agent" has "$out" "⚠ ~/.local/bin is not on PATH; typing herdr-agent won't find this install"
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_rollback() {
+  install_old
+  local a b out rc before
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+  ha_run "$BASE/ha-b.err" "$b" -- --herdr-agent
+  check "install B exit 0" [ $? -eq 0 ]
+  check "B installed" installed_is "$b"
+  before="$(herdr_sum)"
+
+  out="$BASE/ha-rollback-1.err"
+  run_install "$out" -- --herdr-agent --rollback
+  rc=$?
+  check "rollback exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "A's launcher and tree back, byte for byte" installed_is "$a"
+  check "the pair is consistent (A/A; got $(ha_pair))" consistent_as A
+  check "B kept as herdr-agent.previous" same "$HA_PREV" "$b/bin/herdr-agent"
+  check "step line" has "$out" "✓ rolled back herdr-agent (from herdr-agent.previous)"
+  check "summary" has "$out" "✓ rolled back herdr-agent; running agents keep the copy they started with"
+  check "plan: previous is exchanged" has "$out" "                 previous  the current one, kept as herdr-agent.previous"
+
+  out="$BASE/ha-rollback-2.err"
+  run_install "$out" -- --herdr-agent --rollback
+  rc=$?
+  check "second rollback exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "B back, byte for byte" installed_is "$b"
+  check "the pair is consistent (B/B; got $(ha_pair))" consistent_as B
+  check "herdr untouched" [ "$before" = "$(herdr_sum)" ]
+  check "no herdr.previous written" [ ! -e "$PREVIOUS" ]
+  check "no session handed off" no_session_lines
+  check "no temporary files left" no_temp
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_no_previous() {
+  local a out rc before
+  a="$(ha_source A)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+
+  before="$(ha_state)"
+  out="$BASE/ha-no-previous.err"
+  run_install "$out" -- --herdr-agent --rollback
+  rc=$?
+  check "no previous: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "no previous: plan row" has "$out" "  herdr-agent    from      nothing: no herdr-agent.previous"
+  check "no previous: message" has "$out" "✗ no previous herdr-agent at ~/.local/bin/herdr-agent.previous; nothing changed"
+  check "no previous: nothing changed" [ "$before" = "$(ha_state)" ]
+
+  # An install never leaves this state, so it's made by hand
+  /bin/cp -P "$HA_BIN" "$HA_PREV"
+  ln -s "$(readlink "$HA_SHARE")" "$HA_SHARE_PREV"
+  before="$(ha_state)"
+  out="$BASE/ha-same-previous.err"
+  run_install "$out" -- --herdr-agent --rollback
+  rc=$?
+  check "same previous: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "same previous: message" has "$out" "✗ ~/.local/bin/herdr-agent.previous is the same as herdr-agent; nothing to roll back"
+  check "same previous: nothing changed" [ "$before" = "$(ha_state)" ]
+}
+
+# Scenario 8: a loop checks every millisecond that the hook shim, the launcher and an
+# agent link resolve, through 20 alternating installs and rollbacks
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_no_gap() {
+  local a b rc op watcher probes ops=0 bad=0
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  ha_run "$BASE/ha-first.err" "$a" -- --herdr-agent
+  check "first install exit 0" [ $? -eq 0 ]
+  : > "$BASE/work/missing"
+  # no sleep between rounds: a link renamed over a link is missing for microseconds, which
+  # a paced watcher rarely lands in
+  perl -e '
+    my ($miss, $count, @paths) = @ARGV;
+    my $n = 0;
+    $SIG{TERM} = sub { open my $c, ">", $count; print $c "$n\n"; close $c; exit 0 };
+    while (1) {
+      for my $p (@paths) {
+        next if -x $p;
+        open my $m, ">>", $miss; print $m "$n $p\n"; close $m;
+      }
+      $n++;
+    }' "$BASE/work/missing" "$BASE/work/probes" "$HA_SHARE/hook-cmux" "$HA_BIN" "$HA_SHARE/bin/claude" &
+  watcher=$!
+  sleep 0.5
+  for _ in 1 2 3 4 5; do
+    for op in B rollback rollback A; do
+      case "$op" in
+        A) ha_run "$BASE/ha-op.err" "$a" -- --herdr-agent ;;
+        B) ha_run "$BASE/ha-op.err" "$b" -- --herdr-agent ;;
+        rollback) run_install "$BASE/ha-op.err" -- --herdr-agent --rollback ;;
+      esac
+      rc=$?
+      ops=$((ops + 1))
+      [ "$rc" -eq 0 ] || { bad=$((bad + 1)); note "op $ops ($op) exit $rc: $(tail -2 "$BASE/ha-op.err" | tr '\n' ' ')"; }
+    done
+  done
+  sleep 0.5
+  kill -TERM "$watcher" 2> /dev/null
+  wait "$watcher" 2> /dev/null
+  probes="$(cat "$BASE/work/probes" 2> /dev/null)"
+  note "$ops operations, $probes probe rounds"
+  check "20 operations, every one exit 0 ($bad failed)" eval '[ "$ops" -eq 20 ] && [ "$bad" -eq 0 ]'
+  check "the watcher ran through them (${probes:-0} rounds)" [ "${probes:-0}" -gt 1000 ]
+  check "no path was ever missing ($(wc -l < "$BASE/work/missing" | tr -d ' ') misses)" [ ! -s "$BASE/work/missing" ]
+  check "at most two herdr-agent@ trees ($(trees))" [ "$(trees)" -le 2 ]
+  check "A installed at the end, consistent (got $(ha_pair))" eval 'installed_is "$a" && consistent_as A'
+  check "no temporary files left" no_temp
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_refuse() {
+  local a broken out rc before
+  a="$(ha_source A)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+  before="$(ha_state)"
+
+  broken="$(ha_source broken-launcher)"
+  printf '}\n' >> "$broken/bin/herdr-agent"
+  out="$BASE/ha-refuse-launcher.err"
+  ha_run "$out" "$broken" -- --herdr-agent
+  rc=$?
+  check "launcher doesn't parse: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "launcher doesn't parse: message" has "$out" "✗ staged herdr-agent doesn't parse; herdr-agent unchanged"
+  check "launcher doesn't parse: the reason names the launcher" grep -q '^  herdr-agent:[0-9]*: parse error' "$out"
+  check "launcher doesn't parse: installed copy unchanged" [ "$before" = "$(ha_state)" ]
+
+  broken="$(ha_source broken-shim)"
+  printf '}\n' >> "$broken/share/herdr-agent/hook-cmux"
+  out="$BASE/ha-refuse-shim.err"
+  ha_run "$out" "$broken" -- --herdr-agent
+  rc=$?
+  check "hook-cmux doesn't parse: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "hook-cmux doesn't parse: message" has "$out" "✗ staged hook-cmux doesn't parse; herdr-agent unchanged"
+  check "hook-cmux doesn't parse: the reason names hook-cmux" grep -q '^  hook-cmux:[0-9]*: parse error' "$out"
+  check "hook-cmux doesn't parse: installed copy unchanged" [ "$before" = "$(ha_state)" ]
+
+  broken="$(ha_source broken-link)"
+  ln -sfn ../bin/herdr-agent "$broken/share/herdr-agent/bin/claude"
+  out="$BASE/ha-refuse-link.err"
+  ha_run "$out" "$broken" -- --herdr-agent
+  rc=$?
+  check "agent link wrong: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "agent link wrong: message" has "$out" "✗ staged bin/claude points at ../bin/herdr-agent, not ../../../bin/herdr-agent; herdr-agent unchanged"
+  check "agent link wrong: installed copy unchanged" [ "$before" = "$(ha_state)" ]
+
+  broken="$(ha_source broken-help)"
+  # parses, but exits 1 before it can answer --help
+  { head -1 "$broken/bin/herdr-agent"; printf 'exit 1\n'; tail -n +2 "$broken/bin/herdr-agent"; } > "$BASE/work/help-broken"
+  cat "$BASE/work/help-broken" > "$broken/bin/herdr-agent"
+  out="$BASE/ha-refuse-help.err"
+  ha_run "$out" "$broken" -- --herdr-agent
+  rc=$?
+  check "--help fails: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "--help fails: message" has "$out" "✗ staged herdr-agent --help exited 1; herdr-agent unchanged"
+  check "--help fails: installed copy unchanged" [ "$before" = "$(ha_state)" ]
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_same_build() {
+  local a b out rc before
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+  ha_run "$BASE/ha-b.err" "$b" -- --herdr-agent
+  check "install B exit 0" [ $? -eq 0 ]
+  before="$(ha_state)"
+
+  out="$BASE/ha-same-dry.err"
+  ha_run "$out" "$b" -- --herdr-agent --dry-run
+  check "dry run: plan says same as installed" has "$out" "  herdr-agent    same as installed; nothing to change"
+
+  out="$BASE/ha-same.err"
+  ha_run "$out" "$b" -- --herdr-agent
+  rc=$?
+  check "second install of B: exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "step line" has "$out" "✓ herdr-agent unchanged (same as installed)"
+  check "summary" has "$out" "✓ nothing to install; herdr-agent is already this copy"
+  check "no rollback row" has_not "$out" "rollback     "
+  check "no new tree, .previous where it was, nothing else changed" [ "$before" = "$(ha_state)" ]
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_after_build() {
+  install_old
+  local a b out rc before_herdr before_ha
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+  start_sessions default work
+
+  out="$BASE/ha-plain.err"
+  ha_run "$out" "$b" --
+  rc=$?
+  check "plain install: exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "herdr is the build" same "$TARGET" "$BUILD"
+  check "herdr-agent is B" installed_is "$b"
+  check "the pair is consistent (B/B; got $(ha_pair))" consistent_as B
+  check "default handed off" has "$out" "✓ default    handed off; pane processes still running"
+  check "work handed off" has "$out" "✓ work       handed off; pane processes still running"
+  check "herdr-agent after herdr, before any handoff" eval \
+    '[ "$(grep -n "✓ installed herdr-agent" "$out" | cut -d: -f1)" -gt "$(grep -n "✓ installed herdr 0" "$out" | cut -d: -f1)" ] &&
+     [ "$(grep -n "✓ installed herdr-agent" "$out" | cut -d: -f1)" -lt "$(grep -n "⋯ handing off" "$out" | head -1 | cut -d: -f1)" ]'
+  check "summary" has "$out" "✓ installed herdr and herdr-agent; 2 of 2 sessions handed off"
+  check "rollback row for herdr" has "$out" "rollback     herdr        rbf/scripts/install-rbf.sh --rollback"
+  check "rollback row for herdr-agent" has "$out" "             herdr-agent  rbf/scripts/install-rbf.sh --herdr-agent --rollback"
+  check "loops alive" loops_alive default work
+
+  before_herdr="$(herdr_sum)"
+  before_ha="$(ha_state)"
+  out="$BASE/ha-build-failed.err"
+  isolated_env RBF_INSTALL_CARGO=/usr/bin/false RBF_INSTALL_HERDR_AGENT_SRC="$a" "$INSTALL" > "$out.stdout" 2> "$out"
+  rc=$?
+  check "failed build: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "failed build: message" has "$out" "✗ build failed; nothing was written to ~/.local/bin"
+  check "failed build: herdr byte-identical" [ "$before_herdr" = "$(herdr_sum)" ]
+  check "failed build: herdr-agent byte-identical" [ "$before_ha" = "$(ha_state)" ]
+  check "failed build: no herdr-agent step" has_not "$out" "⋯ staging herdr-agent"
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_interrupted() {
+  local a b out rc before
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  # A installed over B, so both .previous entries exist to be kept
+  ha_run "$BASE/ha-b.err" "$b" -- --herdr-agent
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "setup: A installed, B previous" eval 'installed_is "$a" && same "$HA_PREV" "$b/bin/herdr-agent" && [ -L "$HA_SHARE_PREV" ]'
+
+  before="$(ha_state)"
+  out="$BASE/ha-int-staged.err"
+  ha_background "$out" RBF_INSTALL_HERDR_AGENT_SRC="$b" RBF_INSTALL_HERDR_AGENT_PAUSE=staged:5 -- --herdr-agent
+  check "staged: the stage exists before TERM" wait_until 100 staged_exists
+  kill -TERM "$HA_BG_PID"
+  wait "$HA_BG_PID"
+  rc=$?
+  check "staged: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "staged: message" has "$out" "✗ interrupted; herdr-agent unchanged"
+  check "staged: launcher, tree, .previous and no stage left, all as before" [ "$before" = "$(ha_state)" ]
+
+  out="$BASE/ha-int-prepared.err"
+  ha_background "$out" RBF_INSTALL_HERDR_AGENT_SRC="$b" RBF_INSTALL_HERDR_AGENT_PAUSE=prepared:5 -- --herdr-agent
+  check "prepared: the outgoing copy exists before TERM" wait_until 100 prepared_exists
+  kill -TERM "$HA_BG_PID"
+  wait "$HA_BG_PID"
+  rc=$?
+  check "prepared: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "prepared: message" has "$out" "✗ interrupted; herdr-agent unchanged"
+  check "prepared: both .previous entries as before, no .prev or .prevlink left" [ "$before" = "$(ha_state)" ]
+
+  local link_before
+  link_before="$(readlink "$HA_SHARE")"
+  out="$BASE/ha-int-renames.err"
+  ha_background "$out" RBF_INSTALL_HERDR_AGENT_SRC="$b" RBF_INSTALL_HERDR_AGENT_PAUSE=renames:3 -- --herdr-agent
+  check "renames: TERM sent between the two renames" wait_until 100 share_moved_from "$link_before"
+  kill -TERM "$HA_BG_PID"
+  wait "$HA_BG_PID"
+  rc=$?
+  check "renames: the signal is ignored, exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "renames: B installed" installed_is "$b"
+  check "renames: the pair is consistent (B/B; got $(ha_pair))" consistent_as B
+  check "renames: summary" has "$out" "✓ installed herdr-agent; running agents keep the copy they started with"
+  check "renames: no temporary files left" no_temp
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_first_install() {
+  local a out rc before
+  dotfiles_layout
+  a="$(ha_source A)"
+  before="$(dotfiles_sum)"
+  out="$BASE/ha-first.err"
+  ha_run "$out" "$a" -- --herdr-agent
+  rc=$?
+  check "exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "plan: the link is kept as it is" has "$out" "                 previous  kept as herdr-agent.previous (a link, as it is now)"
+  check "the launcher is a regular file" eval '[ -f "$HA_BIN" ] && [ ! -L "$HA_BIN" ]'
+  check "the share link is created" eval '[ -L "$HA_SHARE" ] && [ -d "$HA_SHARE/" ]'
+  check "herdr-agent.previous is the old link itself ($(readlink "$HA_PREV"))" \
+    eval '[ -L "$HA_PREV" ] && [ "$(readlink "$HA_PREV")" = "$DOT_LAUNCHER" ]'
+  check "no previous tree" eval '[ ! -e "$HA_SHARE_PREV" ] && [ ! -L "$HA_SHARE_PREV" ]'
+  check "the dotfiles-like copy is byte-identical" [ "$before" = "$(dotfiles_sum)" ]
+  check "the pair is consistent (A/A; got $(ha_pair))" consistent_as A
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_no_relink() {
+  local a out rc before
+  a="$(ha_source A)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+  before="$(ha_state)"
+
+  out="$BASE/ha-cmux-restart.out"
+  isolated_env "$HA_SRC_REPO/bin/herdr-agent" cmux-restart > "$out" 2>&1
+  rc=$?
+  check "cmux-restart from the checkout: exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "~/.local/bin/herdr-agent still a regular file, byte-identical" \
+    eval '[ -f "$HA_BIN" ] && [ ! -L "$HA_BIN" ] && [ "$before" = "$(ha_state)" ]'
+  check "its output is about cmux's restart entries ($(head -1 "$out"))" grep -q 'cmux restart entries' "$out"
+  check "its output links nothing (no \"linked\" line)" has_not "$out" "linked "
+  check "it's the only line" [ "$(grep -c . "$out")" -eq 1 ]
+
+  out="$BASE/ha-install-cmd.out"
+  isolated_env "$HA_SRC_REPO/bin/herdr-agent" install > "$out" 2>&1
+  rc=$?
+  check "herdr-agent install: refused (exit $rc)" [ "$rc" -ne 0 ]
+  check "herdr-agent install: as an unknown command" has "$out" "unknown command: install"
+  check "herdr-agent install: nothing changed" [ "$before" = "$(ha_state)" ]
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_offline() {
+  local a rc
+  a="$(ha_source A)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+  /bin/mv "$a" "$a.away"
+  check "the source is gone" [ ! -e "$a" ]
+  isolated_env "$HA_BIN" status > "$BASE/ha-status.out" 2>&1
+  rc=$?
+  check "herdr-agent status exits 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "status names the installed shim" has "$BASE/ha-status.out" "routed through $HA_SHARE/hook-cmux"
+  check "zsh -n on the installed hook-cmux" /bin/zsh -n "$HA_SHARE/hook-cmux"
+  check "nothing installed resolves into the source" eval \
+    '! grep -rqF "$a" "$HA_BIN" "$HA_SHARE/" && [ "$(/bin/zsh -fc "print -r -- \${1:A}" ha "$HA_SHARE/bin/claude")" = "$(cd "$BIN_DIR" && pwd -P)/herdr-agent" ]'
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_first_rollback() {
+  install_old
+  local a out rc before_herdr tree_a
+  dotfiles_layout
+  a="$(ha_source A)"
+  before_herdr="$(herdr_sum)"
+  check "start: the pair is the dotfiles one (got $(ha_pair))" consistent_as dotfiles
+
+  ha_run "$BASE/ha-first.err" "$a" -- --herdr-agent
+  rc=$?
+  check "first install: exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "first install: consistent (A/A; got $(ha_pair))" consistent_as A
+  tree_a="$(readlink "$HA_SHARE")"
+
+  out="$BASE/ha-rollback-1.err"
+  run_install "$out" -- --herdr-agent --rollback
+  rc=$?
+  check "first rollback: exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "first rollback: the plan names the link's target" has "$out" "                           $DOT_LAUNCHER"
+  check "first rollback: the plan's support row" has "$out" "                 support   the files beside that link's target"
+  check "first rollback: ~/.local/bin/herdr-agent is the link into the stand-in again" \
+    eval '[ -L "$HA_BIN" ] && [ "$(readlink "$HA_BIN")" = "$DOT_LAUNCHER" ]'
+  check "first rollback: --help exits 0" eval 'isolated_env "$HA_BIN" --help > /dev/null 2>&1'
+  check "first rollback: consistent (dotfiles/dotfiles; got $(ha_pair))" consistent_as dotfiles
+  check "first rollback: the share link stays on tree A" [ "$(readlink "$HA_SHARE")" = "$tree_a" ]
+  isolated_env "$HA_BIN" install > /dev/null 2>&1
+  check "the old install through it leaves the link a link into the stand-in, not to itself" \
+    eval '[ -L "$HA_BIN" ] && [ "$(readlink "$HA_BIN")" = "$DOT_LAUNCHER" ] && isolated_env "$HA_BIN" --help > /dev/null 2>&1'
+
+  out="$BASE/ha-rollback-2.err"
+  run_install "$out" -- --herdr-agent --rollback
+  rc=$?
+  check "second rollback: exit 0 (got $rc)" [ "$rc" -eq 0 ]
+  check "second rollback: launcher A is back" eval '[ -f "$HA_BIN" ] && [ ! -L "$HA_BIN" ] && same "$HA_BIN" "$a/bin/herdr-agent"'
+  check "second rollback: the share link still names tree A" [ "$(readlink "$HA_SHARE")" = "$tree_a" ]
+  check "second rollback: consistent (A/A; got $(ha_pair))" consistent_as A
+  check "second rollback: both contract paths resolve" eval '[ -x "$HA_BIN" ] && [ -x "$HA_SHARE/hook-cmux" ]'
+  check "herdr untouched" [ "$before_herdr" = "$(herdr_sum)" ]
+}
+
+# jq-less PATH: links to every tool the installer and the launcher use, jq left out
+nojq_path() {
+  local dir="$BASE/nojq-bin" tool
+  mkdir -p "$dir"
+  for tool in basename cat chmod cksum cmp cp cut date dirname env find grep head jj ln mkdir mktemp mv paste \
+    perl python3 readlink rm sed shasum sleep sort stat tail tr wc zsh awk; do
+    ln -sf "$(command -v "$tool")" "$dir/$tool"
+  done
+  printf '%s' "$dir"
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_exit_3() {
+  local a broken out rc dir before_ha
+  a="$(ha_source A)"
+  dir="$(nojq_path)"
+  check "the jq-less PATH has no jq" [ ! -e "$dir/jq" ]
+  out="$BASE/ha-nojq.err"
+  isolated_env PATH="$dir" RBF_INSTALL_HERDR_AGENT_SRC="$a" "$INSTALL" --herdr-agent > "$out.stdout" 2> "$out"
+  rc=$?
+  check "no jq: exit 3 (got $rc)" [ "$rc" -eq 3 ]
+  check "no jq: herdr-agent installed" installed_is "$a"
+  check "no jq: plan row" has "$out" "                 cmux      can't check: jq not found"
+  check "no jq: warning" has "$out" "⚠ cmux restart entries not checked; jq not found"
+  check "no jq: summary" has "$out" "⚠ installed herdr-agent"
+  check "no jq: finish row" has "$out" "finish       brew install jq, then herdr-agent cmux-restart"
+
+  # the restart-entry step itself failing: the launcher's reason reaches the warning
+  local b restart="$BASE/.config/cmux/restart-commands.json"
+  b="$(ha_source B)"
+  printf '{}\n' > "$restart"
+  out="$BASE/ha-restart-fails.err"
+  ha_run "$out" "$b" -- --herdr-agent
+  rc=$?
+  check "restart fails: exit 3 (got $rc)" [ "$rc" -eq 3 ]
+  check "restart fails: herdr-agent installed" installed_is "$b"
+  check "restart fails: the reason, not the generic line" has "$out" \
+    "⚠ cmux restart entries not added; ~/.config/cmux/restart-commands.json isn't a restart-commands file cmux can read; add herdr-agent-attach by hand"
+  check "restart fails: finish row" has "$out" "finish       herdr-agent cmux-restart"
+  check "restart fails: the file left alone" [ "$(cat "$restart")" = "{}" ]
+
+  install_old
+  start_sessions default work
+  before_ha="$(ha_state)"
+  broken="$(ha_source broken-shim)"
+  printf '}\n' >> "$broken/share/herdr-agent/hook-cmux"
+  out="$BASE/ha-plain-broken.err"
+  ha_run "$out" "$broken" --
+  rc=$?
+  check "broken herdr-agent in a plain install: exit 3 (got $rc)" [ "$rc" -eq 3 ]
+  check "herdr installed" same "$TARGET" "$BUILD"
+  check "herdr-agent byte-identical" [ "$before_ha" = "$(ha_state)" ]
+  check "warning, not failure" has "$out" "⚠ staged hook-cmux doesn't parse; herdr-agent unchanged"
+  check "default still handed off" has "$out" "✓ default    handed off; pane processes still running"
+  check "work still handed off" has "$out" "✓ work       handed off; pane processes still running"
+  check "summary" has "$out" "⚠ installed herdr, not herdr-agent; 2 of 2 sessions handed off"
+  check "finish row" has "$out" "finish       rbf/scripts/install-rbf.sh --herdr-agent"
+  check "herdr's rollback row only" eval 'has "$out" "rollback     rbf/scripts/install-rbf.sh --rollback" && has_not "$out" "--herdr-agent --rollback"'
+  check "loops alive" loops_alive default work
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_interrupted_plain() {
+  local a b out rc before_ha herdr_in
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "install A exit 0" [ $? -eq 0 ]
+  install_old
+  start_sessions default work
+  before_ha="$(ha_state)"
+  out="$BASE/ha-int-plain.err"
+  ha_background "$out" RBF_INSTALL_HERDR_AGENT_SRC="$b" RBF_INSTALL_HERDR_AGENT_PAUSE=staged:10 --
+  check "the herdr-agent stage exists before TERM" wait_until 300 staged_exists
+  herdr_in=0
+  same "$TARGET" "$BUILD" && herdr_in=1
+  check "herdr was already swapped when TERM was sent" [ "$herdr_in" = 1 ]
+  kill -TERM "$HA_BG_PID"
+  wait "$HA_BG_PID"
+  rc=$?
+  check "exit 3 (got $rc)" [ "$rc" -eq 3 ]
+  check "message" has "$out" "✗ interrupted; herdr is installed, herdr-agent unchanged"
+  check "herdr is the new build" same "$TARGET" "$BUILD"
+  check "herdr-agent launcher, tree, no stage left: as before" [ "$before_ha" = "$(ha_state)" ]
+  check "default handed off" has "$out" "✓ default    handed off; pane processes still running"
+  check "work handed off" has "$out" "✓ work       handed off; pane processes still running"
+  check "summary" has "$out" "⚠ installed herdr, not herdr-agent; 2 of 2 sessions handed off"
+  check "finish row" has "$out" "finish       rbf/scripts/install-rbf.sh --herdr-agent"
+  check "log ends with exit 3" [ "$(tail -1 "$LOG" | sed 's/.* exit //')" = 3 ]
+  check "loops alive" loops_alive default work
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_undo() {
+  local a b out rc before
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  ha_run "$BASE/ha-b.err" "$b" -- --herdr-agent
+  ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+  check "setup: A installed over B" eval 'installed_is "$a" && [ -L "$HA_SHARE_PREV" ]'
+  before="$(ha_state)"
+  out="$BASE/ha-undo.err"
+  ha_run "$out" "$b" RBF_INSTALL_HERDR_AGENT_FAIL=rename2 -- --herdr-agent
+  rc=$?
+  check "over A: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "over A: message" has "$out" "✗ couldn't replace ~/.local/bin/herdr-agent; herdr-agent unchanged"
+  check "over A: share link on tree A, launcher A, both .previous, trees and no temp files as before" \
+    [ "$before" = "$(ha_state)" ]
+  check "over A: consistent (A/A; got $(ha_pair))" consistent_as A
+
+  ha_reset
+  dotfiles_layout
+  out="$BASE/ha-undo-first.err"
+  ha_run "$out" "$a" RBF_INSTALL_HERDR_AGENT_FAIL=rename2 -- --herdr-agent
+  rc=$?
+  check "first install: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "first install: message" has "$out" "✗ couldn't replace ~/.local/bin/herdr-agent; herdr-agent unchanged"
+  check "first install: no share link" eval '[ ! -e "$HA_SHARE" ] && [ ! -L "$HA_SHARE" ]'
+  check "first install: the launcher is still the link into the stand-in" \
+    eval '[ -L "$HA_BIN" ] && [ "$(readlink "$HA_BIN")" = "$DOT_LAUNCHER" ]'
+  check "first install: no .previous" eval '[ ! -e "$HA_PREV" ] && [ ! -L "$HA_PREV" ] && [ ! -L "$HA_SHARE_PREV" ]'
+  check "first install: no tree ($(trees))" [ "$(trees)" -eq 0 ]
+  check "first install: no temporary files left" no_temp
+
+  # the rollback's own step 2 failing: the share link goes back, nothing else moves
+  ha_reset
+  rm -f "$HA_BIN"
+  ha_run "$BASE/ha-a2.err" "$a" -- --herdr-agent
+  ha_run "$BASE/ha-b2.err" "$b" -- --herdr-agent
+  check "rollback: setup B installed over A" eval 'installed_is "$b" && [ -L "$HA_SHARE_PREV" ]'
+  before="$(ha_state)"
+  out="$BASE/ha-undo-rollback.err"
+  run_install "$out" RBF_INSTALL_HERDR_AGENT_FAIL=rename2 -- --herdr-agent --rollback
+  rc=$?
+  check "rollback: exit 1 (got $rc)" [ "$rc" -eq 1 ]
+  check "rollback: message" has "$out" "✗ couldn't restore ~/.local/bin/herdr-agent; herdr-agent unchanged"
+  check "rollback: launchers, share links, trees as before" [ "$before" = "$(ha_state)" ]
+  check "rollback: consistent (B/B; got $(ha_pair))" consistent_as B
+  check "rollback: no temporary files left" no_temp
+}
+
+# shellcheck disable=SC2016,SC2088  # conditions are evaluated by check; ~ paths are labels
+case_herdr_agent_previous_fails() {
+  local a b z out rc step tree_a before pair
+  a="$(ha_source A)"
+  b="$(ha_source B)"
+  z="$(ha_source Z)"
+  for step in rename3 rename4; do
+    ha_reset
+    # Z then A, so a .previous pair (Z/Z) exists that a half-kept A could be mixed with
+    ha_run "$BASE/ha-z.err" "$z" -- --herdr-agent
+    ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+    tree_a="$(readlink "$HA_SHARE")"
+    out="$BASE/ha-$step.err"
+    ha_run "$out" "$b" RBF_INSTALL_HERDR_AGENT_FAIL="$step" -- --herdr-agent
+    rc=$?
+    check "$step: exit 3 (got $rc)" [ "$rc" -eq 3 ]
+    check "$step: B installed" installed_is "$b"
+    check "$step: consistent (B/B; got $(ha_pair))" consistent_as B
+    [ "$step" = rename3 ] &&
+      check "$step: warning" has "$out" "⚠ couldn't keep the previous herdr-agent as herdr-agent.previous"
+    if [ "$step" = rename3 ]; then
+      check "$step: summary" has "$out" "⚠ installed herdr-agent; rollback target not updated"
+    else
+      check "$step: summary" has "$out" "⚠ installed herdr-agent; rollback target removed"
+    fi
+    check "$step: no rollback row" has_not "$out" "rollback     "
+    check "$step: tree A still exists (prune skipped)" [ -d "$SHARE_DIR/$tree_a" ]
+    check "$step: no .prev or .prevlink left" no_temp
+    # whatever .previous is left must be a pair a rollback can install, or nothing at all
+    before="$(ha_state)"
+    run_install "$BASE/ha-$step-rollback.err" -- --herdr-agent --rollback
+    rc=$?
+    if [ "$step" = rename4 ]; then
+      check "$step: the half-kept launcher is removed, not left beside the older tree" \
+        eval '[ ! -e "$HA_PREV" ] && [ ! -L "$HA_PREV" ]'
+      check "$step: warning says the target is removed" has "$out" "⚠ couldn't keep the previous herdr-agent; rollback target removed"
+      check "$step: and what that means" has "$out" "  --herdr-agent --rollback has nothing to restore until the next install"
+      check "$step: a rollback refuses (exit $rc)" [ "$rc" -eq 1 ]
+      check "$step: with no previous herdr-agent" has "$BASE/ha-$step-rollback.err" "✗ no previous herdr-agent at ~/.local/bin/herdr-agent.previous; nothing changed"
+      check "$step: and changes nothing" [ "$before" = "$(ha_state)" ]
+    else
+      pair="$(ha_pair)"
+      check "$step: a rollback installs the older pair, consistent (exit $rc, got $pair)" \
+        eval '[ "$rc" -eq 0 ] && [ "$pair" = Z/Z ]'
+    fi
+  done
+
+  # the rollback's own step 3 or 4 failing: its step 2 used up .previous, so no older
+  # pair is left, and nothing may be left that a second rollback installs as a mixed pair
+  for step in rename3 rename4; do
+    ha_reset
+    ha_run "$BASE/ha-a.err" "$a" -- --herdr-agent
+    ha_run "$BASE/ha-b.err" "$b" -- --herdr-agent
+    out="$BASE/ha-rollback-$step.err"
+    run_install "$out" RBF_INSTALL_HERDR_AGENT_FAIL="$step" -- --herdr-agent --rollback
+    rc=$?
+    check "rollback $step: exit 3 (got $rc)" [ "$rc" -eq 3 ]
+    check "rollback $step: A back, consistent (A/A; got $(ha_pair))" consistent_as A
+    check "rollback $step: warning" has "$out" "⚠ couldn't keep the replaced herdr-agent; rollback target removed"
+    check "rollback $step: and what that means" has "$out" "  --herdr-agent --rollback has nothing to restore until the next install"
+    check "rollback $step: summary" has "$out" "⚠ rolled back herdr-agent; rollback target removed"
+    check "rollback $step: no .previous launcher" eval '[ ! -e "$HA_PREV" ] && [ ! -L "$HA_PREV" ]'
+    check "rollback $step: no temporary files left" no_temp
+    before="$(ha_state)"
+    run_install "$BASE/ha-rollback-$step-again.err" -- --herdr-agent --rollback
+    rc=$?
+    check "rollback $step: a second rollback refuses (exit $rc)" [ "$rc" -eq 1 ]
+    check "rollback $step: and changes nothing" [ "$before" = "$(ha_state)" ]
+  done
+}
+
 # ---------------------------------------------------------------------------
 
 case "$CASE" in
-  dry-run | install | hosting | failed-handoff | interrupted-handoff | classify | rollback | refusals | first-install | path-shadow | alt-screen | attached-window | wedged | real-agent | busy-shell) ;;
+  dry-run | install | hosting | failed-handoff | interrupted-handoff | classify | rollback | refusals | first-install | path-shadow | alt-screen | attached-window | wedged | real-agent | busy-shell | \
+    herdr-agent-install | herdr-agent-only | herdr-agent-rollback | herdr-agent-no-previous | herdr-agent-no-gap | \
+    herdr-agent-refuse | herdr-agent-same-build | herdr-agent-after-build | herdr-agent-interrupted | \
+    herdr-agent-first-install | herdr-agent-no-relink | herdr-agent-offline | herdr-agent-first-rollback | \
+    herdr-agent-exit-3 | herdr-agent-interrupted-plain | herdr-agent-undo | herdr-agent-previous-fails) ;;
   *)
-    echo "usage: rbf/scripts/install-rbf.test.sh <dry-run|install|hosting|failed-handoff|interrupted-handoff|classify|rollback|refusals|first-install|path-shadow|alt-screen|attached-window|wedged|real-agent|busy-shell>" >&2
+    echo "usage: rbf/scripts/install-rbf.test.sh <dry-run|install|hosting|failed-handoff|interrupted-handoff|classify|rollback|refusals|first-install|path-shadow|alt-screen|attached-window|wedged|real-agent|busy-shell|herdr-agent-install|herdr-agent-only|herdr-agent-rollback|herdr-agent-no-previous|herdr-agent-no-gap|herdr-agent-refuse|herdr-agent-same-build|herdr-agent-after-build|herdr-agent-interrupted|herdr-agent-first-install|herdr-agent-no-relink|herdr-agent-offline|herdr-agent-first-rollback|herdr-agent-exit-3|herdr-agent-interrupted-plain|herdr-agent-undo|herdr-agent-previous-fails>" >&2
     exit 2
     ;;
 esac
