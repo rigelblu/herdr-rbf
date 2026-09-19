@@ -243,6 +243,39 @@ pub(super) fn snapshot(
     }
 }
 
+pub(super) fn attached_terminal_snapshot(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+    config_diagnostic: Option<&str>,
+    workspace_index: usize,
+    tab_index: usize,
+    target_pane_id: crate::layout::PaneId,
+) -> Option<protocol::ClientShellSnapshot> {
+    let workspace_id = app.public_workspace_id(workspace_index);
+    let tab_id = app.public_tab_id(workspace_index, tab_index)?;
+    let pane_id = app.public_pane_id(workspace_index, target_pane_id)?;
+    let location = crate::server::clients::ClientShellLocation {
+        focused_workspace_id: Some(workspace_id),
+        active_tab_ids: [(app.public_workspace_id(workspace_index), tab_id)]
+            .into_iter()
+            .collect(),
+    };
+    let mut snapshot = snapshot(app, boot_id, revision, config_diagnostic, Some(&location));
+    snapshot.config_diagnostic = None;
+    snapshot.product_announcement = None;
+    snapshot.latest_release_notes_available = false;
+    snapshot.release_notes = None;
+    snapshot.focused_pane_id = Some(pane_id.clone());
+    for pane in &mut snapshot.panes {
+        pane.focused = pane.pane_id == pane_id;
+    }
+    for agent in &mut snapshot.agents {
+        agent.focused = agent.pane_id == pane_id;
+    }
+    Some(snapshot)
+}
+
 pub(super) struct RenderedPaneSurface {
     pub(super) frame: FrameData,
     pub(super) panes: Vec<protocol::PaneSurfacePane>,
@@ -250,6 +283,92 @@ pub(super) struct RenderedPaneSurface {
     pub(super) popup: Option<Box<protocol::ClientShellPopupSurface>>,
     pub(super) graphics: protocol::SurfaceGraphicsScene,
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
+}
+
+pub(super) fn render_attached_terminal_surface(
+    app: &app::App,
+    workspace_index: usize,
+    tab_index: usize,
+    target_pane_id: crate::layout::PaneId,
+    area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
+    client_id: u64,
+) -> Option<RenderedPaneSurface> {
+    let runtime = app.state.runtime_for_pane_in_workspace(
+        &app.terminal_runtimes,
+        workspace_index,
+        target_pane_id,
+    )?;
+    let content_revision_before = runtime.content_seq();
+    let (buffer, cursor) = crate::server::render_stream::render_terminal_virtual(runtime, area);
+    let hyperlinks = runtime.visible_hyperlinks(area);
+    let content_revision_after = runtime.content_seq();
+    let content_revision = if content_revision_before == content_revision_after
+        && content_revision_after.is_multiple_of(2)
+    {
+        content_revision_after
+    } else {
+        content_revision_after | 1
+    };
+    let pane_id = app.public_pane_id(workspace_index, target_pane_id)?;
+    let (pixel_width, pixel_height) = if cell_size.is_known() {
+        (
+            u32::from(area.width) * cell_size.width_px,
+            u32::from(area.height) * cell_size.height_px,
+        )
+    } else {
+        (0, 0)
+    };
+    let pane_info = crate::layout::PaneInfo {
+        id: target_pane_id,
+        rect: area,
+        inner_rect: area,
+        scrollbar_rect: None,
+        borders: ratatui::widgets::Borders::NONE,
+        is_focused: true,
+    };
+    let tab_target = crate::ui::TabSurfaceTarget {
+        workspace_index,
+        tab_index,
+    };
+    let (graphics, next_graphics_delivery) = crate::server::client_shell_graphics::collect(
+        app,
+        std::slice::from_ref(&pane_info),
+        &[],
+        None,
+        Some(tab_target),
+        cell_size,
+        graphics_delivery,
+        client_id,
+    );
+    Some(RenderedPaneSurface {
+        frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
+        panes: vec![protocol::PaneSurfacePane {
+            pane_id,
+            content_revision,
+            rect: area.into(),
+            inner_rect: area.into(),
+            scrollbar_rect: None,
+            scroll: runtime
+                .scroll_metrics()
+                .map(|metrics| protocol::PaneSurfaceScrollMetrics {
+                    offset_from_bottom: metrics.offset_from_bottom as u64,
+                    max_offset_from_bottom: metrics.max_offset_from_bottom as u64,
+                    viewport_rows: metrics.viewport_rows as u64,
+                }),
+            focused: true,
+            mouse_reporting: runtime.mouse_reporting_enabled(),
+            sgr_pixel_mouse: runtime.sgr_pixel_mouse_enabled(),
+            alternate_screen_active: runtime.alternate_screen_active(),
+            pixel_width,
+            pixel_height,
+        }],
+        splits: Vec::new(),
+        popup: None,
+        graphics,
+        graphics_delivery: next_graphics_delivery,
+    })
 }
 
 pub(super) fn render_pane_surface(

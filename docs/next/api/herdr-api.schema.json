@@ -4423,6 +4423,21 @@
           ],
           "type": "object"
         },
+        "TerminalAttachParams": {
+          "properties": {
+            "takeover": {
+              "default": false,
+              "type": "boolean"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
+        },
         "ToastHerdrPosition": {
           "enum": [
             "top-left",
@@ -5283,6 +5298,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/TabTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.attach",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalAttachParams"
             }
           },
           "required": [
@@ -10640,6 +10671,28 @@
               "required": [
                 "type",
                 "active",
+                "projection_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "projection_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "terminal_attached",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
                 "projection_revision"
               ],
               "type": "object"

@@ -144,6 +144,9 @@ impl ClientShellState {
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
         if self.snapshot.is_none() || self.pane_surface.is_none() {
+            if self.config.attached_terminal {
+                return None;
+            }
             return Some(self.compose_unavailable(cols, rows));
         }
         let snapshot = self.snapshot.as_deref()?;
@@ -156,6 +159,7 @@ impl ClientShellState {
         if snapshot.revision != surface.projection_revision {
             return None;
         }
+        let attached_terminal = self.config.attached_terminal;
         let layout = self.layout(cols, rows);
         if self.last_tab_bar_width != Some(layout.tab_bar.width) {
             self.last_tab_bar_width = Some(layout.tab_bar.width);
@@ -176,34 +180,38 @@ impl ClientShellState {
             _ => (None, None),
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
-        self.hits = render::render_shell(
-            &mut buffer,
-            layout,
-            snapshot,
-            &self.config,
-            render::ShellRenderState {
-                endpoints: &self.endpoints,
-                active_endpoint_id: &self.active_endpoint_id,
-                collapsed_endpoints: &self.collapsed_endpoints,
-                collapsed_groups: &self.collapsed_groups,
-                remote_collapsed_groups: &self.remote_collapsed_groups,
-                workspace_scroll: &mut self.workspace_scroll,
-                agent_scroll: &mut self.agent_scroll,
-                tab_scroll: &mut self.tab_scroll,
-                reveal_focused_workspace: &mut self.reveal_focused_workspace,
-                reveal_focused_tab: &mut self.reveal_focused_tab,
-                sidebar_collapsed: self.sidebar_collapsed,
-                sidebar_section_split: self.sidebar_section_split,
-                tab_drag_insert_index,
-                selected_workspace_id: self
-                    .navigate_workspace_id
-                    .as_ref()
-                    .filter(|_| valid_navigation_target),
-                reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
-                dragged_workspace_id,
-                workspace_drop_indicator_row,
-            },
-        );
+        self.hits = if attached_terminal {
+            ShellHitMap::default()
+        } else {
+            render::render_shell(
+                &mut buffer,
+                layout,
+                snapshot,
+                &self.config,
+                render::ShellRenderState {
+                    endpoints: &self.endpoints,
+                    active_endpoint_id: &self.active_endpoint_id,
+                    collapsed_endpoints: &self.collapsed_endpoints,
+                    collapsed_groups: &self.collapsed_groups,
+                    remote_collapsed_groups: &self.remote_collapsed_groups,
+                    workspace_scroll: &mut self.workspace_scroll,
+                    agent_scroll: &mut self.agent_scroll,
+                    tab_scroll: &mut self.tab_scroll,
+                    reveal_focused_workspace: &mut self.reveal_focused_workspace,
+                    reveal_focused_tab: &mut self.reveal_focused_tab,
+                    sidebar_collapsed: self.sidebar_collapsed,
+                    sidebar_section_split: self.sidebar_section_split,
+                    tab_drag_insert_index,
+                    selected_workspace_id: self
+                        .navigate_workspace_id
+                        .as_ref()
+                        .filter(|_| valid_navigation_target),
+                    reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
+                    dragged_workspace_id,
+                    workspace_drop_indicator_row,
+                },
+            )
+        };
         self.hits.panes = surface
             .panes
             .iter()
@@ -287,7 +295,7 @@ impl ClientShellState {
         let mobile_navigate_panel = !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
             && self.endpoint_error.is_none();
-        let mode_bar = if mobile_navigate_panel || self.overlay.is_some() {
+        let mode_bar = if attached_terminal || mobile_navigate_panel || self.overlay.is_some() {
             None
         } else {
             render::render_mode_bar(
@@ -426,10 +434,11 @@ impl ClientShellState {
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
             .filter(|endpoint| endpoint.status != ClientEndpointStatus::Online)
             .map(|endpoint| (endpoint.label.clone(), endpoint.status));
-        if has_config_diagnostic
-            || active_lifecycle.is_some()
-            || self.visible_endpoint_notice.is_some()
-            || self.visible_notification.is_some()
+        if !attached_terminal
+            && (has_config_diagnostic
+                || active_lifecycle.is_some()
+                || self.visible_endpoint_notice.is_some()
+                || self.visible_notification.is_some())
         {
             let cursor = frame.cursor.clone();
             let mut composed = frame.to_ratatui_buffer()?;
@@ -561,7 +570,8 @@ impl ClientShellState {
                 });
             }
         }
-        if !layout.mobile_header.is_empty()
+        if !attached_terminal
+            && !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
             && self.overlay.is_none()
         {
@@ -609,7 +619,7 @@ impl ClientShellState {
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
         }
-        if let Some(overlay) = self.overlay.as_ref() {
+        if let Some(overlay) = self.overlay.as_ref().filter(|_| !attached_terminal) {
             let mut composed = frame.to_ratatui_buffer()?;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
                 let rendered =

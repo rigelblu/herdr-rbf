@@ -310,6 +310,10 @@ pub enum ResponseResult {
         active: bool,
         projection_revision: u64,
     },
+    TerminalAttached {
+        pane_id: String,
+        projection_revision: u64,
+    },
     Ok {},
 }
 

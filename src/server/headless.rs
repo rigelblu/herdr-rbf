@@ -1018,15 +1018,17 @@ impl HeadlessServer {
         if let Some(mut removed) = removed {
             let held_inputs = removed.drain_shell_held_inputs();
             self.release_client_shell_inputs(client_id, held_inputs);
+            let attached_terminal_id = match &removed.mode {
+                ClientConnectionMode::TerminalAttach { terminal_id } => Some(terminal_id.clone()),
+                _ => removed.attached_terminal_id().map(str::to_owned),
+            };
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
-            if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
+            if let Some(terminal_id) = attached_terminal_id {
                 self.terminal_attach_owners.remove(&terminal_id);
-                if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
-                    self.app
-                        .state
-                        .direct_attach_resize_locks
-                        .remove(&terminal_id);
-                }
+                self.app
+                    .state
+                    .direct_attach_resize_locks
+                    .retain(|locked| locked.to_string() != terminal_id);
             }
         }
         if should_release_focus {
@@ -1518,6 +1520,13 @@ impl HeadlessServer {
     /// the host terminal title never follows the session — which is what window
     /// managers read for tab and group bar labels.
     fn sync_window_title(&mut self) {
+        if self
+            .foreground_client_id
+            .and_then(|client_id| self.clients.get(&client_id))
+            .is_some_and(|client| client.attached_terminal_id().is_some())
+        {
+            return;
+        }
         let title = match &self.api_window_title {
             Some(title) => Some(title.clone()),
             None if self.app.window_title_configured() => self.configured_window_title(),
@@ -1797,59 +1806,20 @@ impl HeadlessServer {
             return false;
         }
 
-        let Some(real_terminal_id) = self.terminal_id_by_string(&terminal_id) else {
-            self.send_to_client(
-                client_id,
-                ServerMessage::ServerShutdown {
-                    reason: Some(format!(
-                        "terminal attach failed: terminal {terminal_id} not found"
-                    )),
-                },
-            );
-            self.remove_client_and_resize_if_needed(client_id);
-            return false;
-        };
-
-        if self
-            .pending_alt_screen_reads
-            .iter()
-            .any(|pending| pending.terminal_id == real_terminal_id)
-        {
-            self.send_to_client(
-                client_id,
-                ServerMessage::ServerShutdown {
-                    reason: Some(format!(
-                        "terminal attach failed: terminal {terminal_id} has a read in progress; retry"
-                    )),
-                },
-            );
-            self.remove_client_and_resize_if_needed(client_id);
-            return false;
-        }
-
-        if let Some(existing_owner) = self.terminal_attach_owners.get(&terminal_id).copied() {
-            if existing_owner != client_id && !takeover {
-                self.send_to_client(
-                    client_id,
-                    ServerMessage::ServerShutdown {
-                        reason: Some(format!(
-                            "terminal attach failed: terminal {terminal_id} already has an attached client; retry with --takeover"
-                        )),
-                    },
-                );
-                self.remove_client_and_resize_if_needed(client_id);
-                return false;
-            }
-            if existing_owner != client_id {
-                self.send_to_client(
-                    existing_owner,
-                    ServerMessage::ServerShutdown {
-                        reason: Some("terminal attach taken over".to_owned()),
-                    },
-                );
-                self.remove_client_and_resize_if_needed(existing_owner);
-            }
-        }
+        let real_terminal_id =
+            match self.claim_terminal_attachment(client_id, &terminal_id, takeover) {
+                Ok(terminal_id) => terminal_id,
+                Err(reason) => {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::ServerShutdown {
+                            reason: Some(reason),
+                        },
+                    );
+                    self.remove_client_and_resize_if_needed(client_id);
+                    return false;
+                }
+            };
 
         let stamp = self.allocate_activity_stamp();
         let Some(client) = self.clients.get_mut(&client_id) else {
@@ -1868,19 +1838,68 @@ impl HeadlessServer {
         }
 
         info!(client_id, cols, rows, terminal_id = %terminal_id, "terminal attach client connected");
-        self.terminal_attach_owners
-            .insert(terminal_id.clone(), client_id);
         self.sync_terminal_attach_titles();
+        self.resize_attached_terminal(&real_terminal_id, rows, cols, cell_size);
+        true
+    }
+
+    fn claim_terminal_attachment(
+        &mut self,
+        client_id: u64,
+        terminal_id: &str,
+        takeover: bool,
+    ) -> Result<crate::terminal::TerminalId, String> {
+        let Some(real_terminal_id) = self.terminal_id_by_string(terminal_id) else {
+            return Err(format!(
+                "terminal attach failed: terminal {terminal_id} not found"
+            ));
+        };
+        if self
+            .pending_alt_screen_reads
+            .iter()
+            .any(|pending| pending.terminal_id == real_terminal_id)
+        {
+            return Err(format!(
+                "terminal attach failed: terminal {terminal_id} has a read in progress; retry"
+            ));
+        }
+        if let Some(existing_owner) = self.terminal_attach_owners.get(terminal_id).copied() {
+            if existing_owner != client_id && !takeover {
+                return Err(format!(
+                    "terminal attach failed: terminal {terminal_id} already has an attached client; retry with --takeover"
+                ));
+            }
+            if existing_owner != client_id {
+                self.send_to_client(
+                    existing_owner,
+                    ServerMessage::ServerShutdown {
+                        reason: Some("terminal attach taken over".to_owned()),
+                    },
+                );
+                self.remove_client_and_resize_if_needed(existing_owner);
+            }
+        }
+        self.terminal_attach_owners
+            .insert(terminal_id.to_owned(), client_id);
         self.app
             .state
             .direct_attach_resize_locks
             .insert(real_terminal_id.clone());
+        Ok(real_terminal_id)
+    }
+
+    fn resize_attached_terminal(
+        &mut self,
+        terminal_id: &crate::terminal::TerminalId,
+        rows: u16,
+        cols: u16,
+        cell_size: crate::kitty_graphics::HostCellSize,
+    ) {
         self.app
-            .start_pending_agent_resume_for_terminal(&real_terminal_id, rows, cols, true);
-        if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
+            .start_pending_agent_resume_for_terminal(terminal_id, rows, cols, true);
+        if let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) {
             runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
         }
-        true
     }
 
     fn client_is_pending_terminal_mode(&self, client_id: u64) -> bool {
@@ -2034,7 +2053,9 @@ impl HeadlessServer {
                             return false;
                         }
                     };
-                connection.shell_location = Some(location);
+                connection.shell_presentation = Some(
+                    crate::server::clients::ClientShellPresentation::Workspace(location),
+                );
                 connection.shell_snapshot = Some(seed_snapshot);
                 connection.shell_agent_view = agent_view;
                 self.clients.insert(client_id, connection);
@@ -2272,8 +2293,21 @@ impl HeadlessServer {
                 if !client.shell_surface_active {
                     return false;
                 }
+                let attached_terminal_id = client.attached_terminal_id().map(str::to_owned);
+                let cell_size = client.cell_size;
                 client.request_repaint();
                 self.promote_client_to_foreground(client_id);
+                if let Some(terminal_id) = attached_terminal_id {
+                    if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
+                        runtime.resize(
+                            surface_rows,
+                            surface_cols,
+                            cell_size.width_px,
+                            cell_size.height_px,
+                        );
+                    }
+                    return true;
+                }
                 self.resize_shell_tab_if_controller(client_id, true);
                 true
             }

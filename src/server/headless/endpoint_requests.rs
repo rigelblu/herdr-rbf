@@ -65,12 +65,36 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return false;
         }
+        if let api::schema::Method::TerminalAttach(params) = &request.method {
+            return self.handle_semantic_terminal_attach(
+                client_id,
+                boot_id,
+                request_id,
+                params.clone(),
+            );
+        }
         if !surface_active {
             let message = crate::server::client_commands::error_message(
                 boot_id,
                 request_id,
                 "surface_inactive",
                 "this method requires an active client shell surface",
+            );
+            self.send_to_client(client_id, message);
+            return false;
+        }
+        if self.attached_shell_target(client_id).is_some()
+            && !matches!(
+                &request.method,
+                api::schema::Method::PaneSelectionRead(_)
+                    | api::schema::Method::PaneSelectionReadJoined(_)
+            )
+        {
+            let message = crate::server::client_commands::error_message(
+                boot_id,
+                request_id,
+                "unsupported_endpoint_command",
+                "attached terminals only accept selection reads",
             );
             self.send_to_client(client_id, message);
             return false;
@@ -126,5 +150,121 @@ impl HeadlessServer {
                     stream_active: None,
                 },
             )
+    }
+
+    fn handle_semantic_terminal_attach(
+        &mut self,
+        client_id: u64,
+        boot_id: String,
+        request_id: String,
+        params: api::schema::TerminalAttachParams,
+    ) -> bool {
+        if self.attached_shell_target(client_id).is_some() {
+            self.send_to_client(
+                client_id,
+                crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "terminal_attach_failed",
+                    "this connection is already attached to a terminal",
+                ),
+            );
+            return false;
+        }
+        let Some(terminal_id) = self.resolve_terminal_target_id_string(&params.terminal_id) else {
+            self.send_to_client(
+                client_id,
+                crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "terminal_not_found",
+                    format!(
+                        "terminal attach failed: terminal {} not found",
+                        params.terminal_id
+                    ),
+                ),
+            );
+            return false;
+        };
+        let target = match self.app.resolve_terminal_target(&terminal_id) {
+            Ok(target) => target,
+            Err(_) => {
+                self.send_to_client(
+                    client_id,
+                    crate::server::client_commands::error_message(
+                        boot_id,
+                        request_id,
+                        "terminal_not_found",
+                        format!("terminal attach failed: terminal {terminal_id} not found"),
+                    ),
+                );
+                return false;
+            }
+        };
+        let Some(pane_id) = self.app.public_pane_id(target.ws_idx, target.pane_id) else {
+            self.send_to_client(
+                client_id,
+                crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "terminal_not_found",
+                    format!("terminal attach failed: terminal {terminal_id} not found"),
+                ),
+            );
+            return false;
+        };
+        let real_terminal_id =
+            match self.claim_terminal_attachment(client_id, &terminal_id, params.takeover) {
+                Ok(terminal_id) => terminal_id,
+                Err(reason) => {
+                    self.send_to_client(
+                        client_id,
+                        crate::server::client_commands::error_message(
+                            boot_id,
+                            request_id,
+                            "terminal_attach_failed",
+                            reason,
+                        ),
+                    );
+                    return false;
+                }
+            };
+
+        let stamp = self.allocate_activity_stamp();
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        let (cols, rows) = client.terminal_size;
+        let cell_size = client.cell_size;
+        client.shell_presentation = Some(
+            crate::server::clients::ClientShellPresentation::AttachedTerminal {
+                terminal_id: terminal_id.clone(),
+            },
+        );
+        client.shell_projection_revision = client.shell_projection_revision.saturating_add(1);
+        let projection_revision = client.shell_projection_revision;
+        client.shell_snapshot = None;
+        client.shell_surface_active = true;
+        client.render_state.reset_baseline();
+        client.request_repaint();
+        client.last_activity = stamp;
+
+        self.tab_geometry_controllers
+            .retain(|_, controller_id| *controller_id != client_id);
+        self.promote_client_to_foreground(client_id);
+        self.resize_attached_terminal(&real_terminal_id, rows, cols, cell_size);
+        self.send_to_client(
+            client_id,
+            crate::server::client_commands::success_message_with_result(
+                boot_id,
+                request_id,
+                api::schema::ResponseResult::TerminalAttached {
+                    pane_id,
+                    projection_revision,
+                },
+            ),
+        );
+        self.sync_terminal_attach_titles();
+        true
     }
 }

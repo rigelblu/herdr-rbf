@@ -122,6 +122,7 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            attached_terminal: false,
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
             sidebar_max_width: config.ui.sidebar_max_width,
@@ -169,6 +170,12 @@ impl ClientShellConfig {
             startup_config_diagnostic: None,
             startup_onboarding: false,
         }
+    }
+
+    pub(crate) fn with_attached_terminal(mut self) -> Self {
+        self.attached_terminal = true;
+        self.startup_onboarding = false;
+        self
     }
 
     pub(crate) fn with_startup_config_diagnostic(mut self, diagnostic: Option<String>) -> Self {
@@ -434,6 +441,12 @@ impl ClientShellConfig {
     }
 
     pub(crate) fn initial_surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
+        if self.attached_terminal {
+            return ClientSurfaceSize {
+                cols: cols.max(1),
+                rows: rows.max(1),
+            };
+        }
         let sidebar_shape = super::sidebar_shape::SidebarShapeState::from_preferences(
             &self.preferences,
             self.sidebar_start_collapsed,
@@ -537,6 +550,31 @@ mod tests {
         let state = ClientShellState::new(config);
         assert_eq!(initial, state.surface_size(100, 30));
         std::fs::remove_file(path).expect("remove endpoint chrome");
+    }
+
+    #[test]
+    fn attached_terminal_initial_surface_uses_the_full_host_geometry() {
+        let config = ClientShellConfig::from_config(&Config::default()).with_attached_terminal();
+
+        assert_eq!(
+            config.initial_surface_size(100, 30),
+            ClientSurfaceSize {
+                cols: 100,
+                rows: 30,
+            }
+        );
+        let state = ClientShellState::new(config);
+        assert_eq!(
+            state.surface_size(120, 40),
+            ClientSurfaceSize {
+                cols: 120,
+                rows: 40,
+            }
+        );
+        assert_eq!(
+            state.surface_size(0, 0),
+            ClientSurfaceSize { cols: 1, rows: 1 }
+        );
     }
 
     #[test]
