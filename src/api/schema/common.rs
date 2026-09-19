@@ -68,6 +68,13 @@ pub struct ClientShellSurfaceSetParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalAttachParams {
+    pub terminal_id: String,
+    #[serde(default)]
+    pub takeover: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SplitDirection {
     Right,

@@ -66,6 +66,12 @@ pub(crate) struct ClientShellLocation {
     pub(crate) active_tab_ids: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClientShellPresentation {
+    Workspace(ClientShellLocation),
+    AttachedTerminal { terminal_id: String },
+}
+
 pub(crate) struct ClientShellTopology {
     pub(crate) focused_workspace_id: Option<String>,
     pub(crate) fallback_workspace_id: Option<String>,
@@ -173,8 +179,8 @@ pub(crate) struct ClientConnection {
     shell_held_inputs: HashMap<ClientShellPressId, ClientShellHeldInput>,
     /// Temporary files staged from this client's local clipboard image pastes.
     pub(crate) staged_clipboard_files: Vec<PathBuf>,
-    /// Connection-local workspace and tab projection for a client-owned shell.
-    pub(crate) shell_location: Option<ClientShellLocation>,
+    /// Connection-local presentation for a client-owned shell.
+    pub(crate) shell_presentation: Option<ClientShellPresentation>,
     /// Last coherent shell replacement sent to this client.
     pub(crate) shell_snapshot: Option<crate::protocol::ClientShellSnapshot>,
     pub(crate) shell_agent_completions: Option<crate::protocol::endpoint::EndpointAgentCompletions>,
@@ -247,7 +253,7 @@ impl ClientConnection {
             host_keyboard_protocol_active: None,
             shell_held_inputs: HashMap::new(),
             staged_clipboard_files: Vec::new(),
-            shell_location: None,
+            shell_presentation: None,
             shell_snapshot: None,
             shell_agent_completions: None,
             shell_agent_view: None,
@@ -268,6 +274,27 @@ impl ClientConnection {
 
     pub(crate) fn request_recompute(&mut self) {
         self.render_state.request_recompute();
+    }
+
+    pub(crate) fn shell_location(&self) -> Option<&ClientShellLocation> {
+        match self.shell_presentation.as_ref()? {
+            ClientShellPresentation::Workspace(location) => Some(location),
+            ClientShellPresentation::AttachedTerminal { .. } => None,
+        }
+    }
+
+    pub(crate) fn shell_location_mut(&mut self) -> Option<&mut ClientShellLocation> {
+        match self.shell_presentation.as_mut()? {
+            ClientShellPresentation::Workspace(location) => Some(location),
+            ClientShellPresentation::AttachedTerminal { .. } => None,
+        }
+    }
+
+    pub(crate) fn attached_terminal_id(&self) -> Option<&str> {
+        match self.shell_presentation.as_ref()? {
+            ClientShellPresentation::AttachedTerminal { terminal_id } => Some(terminal_id),
+            ClientShellPresentation::Workspace(_) => None,
+        }
     }
 
     pub(crate) fn track_shell_input(
@@ -490,14 +517,17 @@ pub(crate) fn terminal_stream_client_ids(
 ) -> Vec<u64> {
     clients
         .iter()
-        .filter_map(|(&client_id, client)| match &client.mode {
-            ClientConnectionMode::TerminalAttach {
-                terminal_id: attached,
-            }
-            | ClientConnectionMode::TerminalObserve {
-                terminal_id: attached,
-            } if attached == terminal_id => Some(client_id),
-            _ => None,
+        .filter_map(|(&client_id, client)| {
+            let direct_terminal_id = match &client.mode {
+                ClientConnectionMode::TerminalAttach { terminal_id }
+                | ClientConnectionMode::TerminalObserve { terminal_id } => {
+                    Some(terminal_id.as_str())
+                }
+                _ => None,
+            };
+            (direct_terminal_id == Some(terminal_id)
+                || client.attached_terminal_id() == Some(terminal_id))
+            .then_some(client_id)
         })
         .collect()
 }

@@ -72,7 +72,7 @@ async fn public_pane_move_focus_follows_the_moved_pane() {
     assert!(moved.changed);
     assert_eq!(server.app.state.active, Some(1));
     assert!(moved.closed_tab_id.is_some());
-    let location = server.clients[&9].shell_location.as_ref().unwrap();
+    let location = server.clients[&9].shell_location().unwrap();
     assert_eq!(
         location.focused_workspace_id.as_deref(),
         Some(destination_id.as_str()),
@@ -168,7 +168,7 @@ async fn public_pane_move_focus_handles_source_removal_and_unchanged_server_targ
             let target = server.shell_focus_target(client_id).unwrap();
             assert_eq!(target.pane_id, source);
             if new_workspace {
-                let location = server.clients[&client_id].shell_location.as_ref().unwrap();
+                let location = server.clients[&client_id].shell_location().unwrap();
                 assert_eq!(location.active_tab_ids.len(), 1);
             }
         }
@@ -188,7 +188,7 @@ async fn public_pane_move_without_effective_focus_preserves_client_views() {
         let (_source_control, _source_render) = connect_test_shell(&mut server, 10, 80, 23);
         // Keep a valid view distinct from the server default in every case.
         assert!(server.focus_shell_client_on_tab(9, &remaining_tab));
-        let location_before = server.clients[&9].shell_location.clone();
+        let location_before = server.clients[&9].shell_location().cloned();
         let revision_before = server.clients[&9].shell_projection_revision;
         if case == "zoomed" {
             server.app.state.workspaces[0].tabs[0].zoomed = true;
@@ -216,7 +216,11 @@ async fn public_pane_move_without_effective_focus_preserves_client_views() {
         } else {
             assert_eq!(result.unwrap().changed, case == "no-focus");
         }
-        assert_eq!(server.clients[&9].shell_location, location_before, "{case}");
+        assert_eq!(
+            server.clients[&9].shell_location().cloned(),
+            location_before,
+            "{case}"
+        );
         assert_eq!(
             server.clients[&9].shell_projection_revision, revision_before,
             "{case}"

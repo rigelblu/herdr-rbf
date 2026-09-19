@@ -5,6 +5,17 @@ impl HeadlessServer {
         &self,
         client_id: u64,
     ) -> Option<(&crate::terminal::TerminalRuntime, crate::layout::PaneId)> {
+        if let Some(target) = self.attached_shell_target(client_id) {
+            return self
+                .app
+                .state
+                .runtime_for_pane_in_workspace(
+                    &self.app.terminal_runtimes,
+                    target.workspace_index,
+                    target.pane_id,
+                )
+                .map(|runtime| (runtime, target.pane_id));
+        }
         if self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id) {
             if let Some(popup) = &self.app.state.popup_pane {
                 return self
@@ -229,6 +240,10 @@ impl HeadlessServer {
                 if !client.is_active_shell_client() || client.writer.is_none() {
                     continue;
                 }
+                if let Some(target) = self.attached_shell_target(client_id) {
+                    pane_ids.insert(target.pane_id);
+                    continue;
+                }
                 let Some(target) = self.shell_target_for_client(client_id) else {
                     continue;
                 };
@@ -346,6 +361,11 @@ impl HeadlessServer {
         self.clients.iter().any(|(&client_id, client)| {
             if !client.is_active_shell_client() || client.writer.is_none() {
                 return false;
+            }
+            if let Some(attached_terminal_id) = client.attached_terminal_id() {
+                return self
+                    .terminal_id_for_pane(pane_id)
+                    .is_some_and(|terminal_id| terminal_id.as_str() == attached_terminal_id);
             }
             if self
                 .app
@@ -511,16 +531,36 @@ impl HeadlessServer {
                 } else {
                     crate::kitty_graphics::HostCellSize::default()
                 };
-                let result = render_client_shell_pane_surface(
-                    &mut self.app,
-                    shell_target,
-                    area,
-                    false,
-                    shell_shows_popup,
-                    render_cell_size,
-                    &shell_graphics_delivery,
-                    client_id,
-                );
+                let attached_target = self.attached_shell_target(client_id);
+                let result = if let Some(target) = attached_target {
+                    match crate::server::client_shell::render_attached_terminal_surface(
+                        &self.app,
+                        target.workspace_index,
+                        target.tab_index,
+                        target.pane_id,
+                        area,
+                        render_cell_size,
+                        &shell_graphics_delivery,
+                        client_id,
+                    ) {
+                        Some(surface) => Ok(surface),
+                        None => {
+                            broken_clients.push(client_id);
+                            continue;
+                        }
+                    }
+                } else {
+                    render_client_shell_pane_surface(
+                        &mut self.app,
+                        shell_target,
+                        area,
+                        false,
+                        shell_shows_popup,
+                        render_cell_size,
+                        &shell_graphics_delivery,
+                        client_id,
+                    )
+                };
                 crate::render_prof::duration_since(
                     "full_render.render_tab_surface_virtual",
                     render_started,
@@ -545,33 +585,93 @@ impl HeadlessServer {
             };
             let mut shell_projection_revision = 0;
             if matches!(mode, ClientConnectionMode::ClientShell) {
-                let location = self
+                let presentation = self
                     .clients
                     .get(&client_id)
-                    .and_then(|client| client.shell_location.clone());
-                let agent_view = self.app.state.agent_view_override.clone();
-                let Some(client) = self.clients.get_mut(&client_id) else {
-                    continue;
-                };
-                let (mut candidate, mut completions) = client_shell_snapshot(
-                    &self.app,
-                    &self.client_shell_boot_id,
-                    client.shell_projection_revision,
-                    None,
-                    location.as_ref(),
-                );
-                candidate.config_diagnostic = if client.shell_uses_endpoint_keybindings {
+                    .and_then(|client| client.shell_presentation.clone());
+                let current_revision = self
+                    .clients
+                    .get(&client_id)
+                    .map_or(0, |client| client.shell_projection_revision);
+                let config_diagnostic = if self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.shell_uses_endpoint_keybindings)
+                {
                     self.server_config_diagnostic.clone()
                 } else {
                     self.server_config_diagnostic_without_keybindings.clone()
+                };
+                let (mut candidate, mut completions) = match presentation.as_ref() {
+                    Some(crate::server::clients::ClientShellPresentation::Workspace(location)) => {
+                        client_shell_snapshot(
+                            &self.app,
+                            &self.client_shell_boot_id,
+                            current_revision,
+                            config_diagnostic.as_deref(),
+                            Some(location),
+                        )
+                    }
+                    Some(crate::server::clients::ClientShellPresentation::AttachedTerminal {
+                        terminal_id,
+                    }) => {
+                        let Ok(target) = self.app.resolve_terminal_target(terminal_id) else {
+                            self.send_to_client(
+                                client_id,
+                                ServerMessage::ServerShutdown {
+                                    reason: Some(format!(
+                                        "terminal attach ended: terminal {terminal_id} not found"
+                                    )),
+                                },
+                            );
+                            broken_clients.push(client_id);
+                            continue;
+                        };
+                        let Some(snapshot) =
+                            crate::server::client_shell::attached_terminal_snapshot(
+                                &self.app,
+                                &self.client_shell_boot_id,
+                                current_revision,
+                                config_diagnostic.as_deref(),
+                                target.ws_idx,
+                                target.tab_idx,
+                                target.pane_id,
+                            )
+                        else {
+                            self.send_to_client(
+                                client_id,
+                                ServerMessage::ServerShutdown {
+                                    reason: Some(format!(
+                                        "terminal attach ended: terminal {terminal_id} not found"
+                                    )),
+                                },
+                            );
+                            broken_clients.push(client_id);
+                            continue;
+                        };
+                        snapshot
+                    }
+                    None => client_shell_snapshot(
+                        &self.app,
+                        &self.client_shell_boot_id,
+                        current_revision,
+                        config_diagnostic.as_deref(),
+                        None,
+                    ),
+                };
+                let agent_view = self.app.state.agent_view_override.clone();
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    continue;
                 };
                 candidate.revision = client.shell_projection_revision;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
                     || client.shell_agent_view != agent_view
                 {
-                    client.shell_projection_revision =
-                        client.shell_projection_revision.saturating_add(1);
+                    if client.shell_snapshot.is_some() {
+                        client.shell_projection_revision =
+                            client.shell_projection_revision.saturating_add(1);
+                    }
                     candidate.revision = client.shell_projection_revision;
                     completions.revision = candidate.revision;
                     let completion_framed =

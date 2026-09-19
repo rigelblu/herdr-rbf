@@ -122,6 +122,7 @@ pub(super) struct HandshakeResult {
     pub(super) encoding: RenderEncoding,
     pub(super) endpoint_methods: Option<Vec<String>>,
     pub(super) endpoint_capabilities: Option<Vec<String>>,
+    pub(super) prefetched_messages: Vec<ServerMessage>,
 }
 
 pub(crate) fn probe_endpoint_negotiation(
@@ -271,6 +272,7 @@ pub(super) fn do_handshake(
             encoding: RenderEncoding::SemanticFrame,
             endpoint_methods: Some(welcome.methods),
             endpoint_capabilities: Some(welcome.capabilities),
+            prefetched_messages: Vec::new(),
         });
     }
 
@@ -288,6 +290,7 @@ pub(super) fn do_handshake(
                 encoding,
                 endpoint_methods: None,
                 endpoint_capabilities: None,
+                prefetched_messages: Vec::new(),
             })
         }
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(

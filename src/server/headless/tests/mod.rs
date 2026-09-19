@@ -2625,8 +2625,8 @@ async fn public_workspace_focus_preserves_each_clients_remembered_tabs() {
         stream_active: None,
     });
 
-    let first_location = server.clients[&41].shell_location.as_ref().unwrap();
-    let second_location = server.clients[&42].shell_location.as_ref().unwrap();
+    let first_location = server.clients[&41].shell_location().unwrap();
+    let second_location = server.clients[&42].shell_location().unwrap();
     assert_eq!(
         first_location.focused_workspace_id.as_deref(),
         Some(second_workspace_id.as_str())
@@ -2713,7 +2713,7 @@ async fn public_agent_focus_replaces_a_diverged_client_shell_projection() {
     assert_eq!(agent.pane_id, first_pane_id);
     assert!(agent.focused);
     assert_eq!(server.app.state.active, Some(0));
-    let location = server.clients[&9].shell_location.as_ref().unwrap();
+    let location = server.clients[&9].shell_location().unwrap();
     assert_eq!(
         location.focused_workspace_id.as_deref(),
         Some(first_workspace_id.as_str())
@@ -4053,6 +4053,376 @@ fn connect_pending_terminal_client_with_control_rx(
 }
 
 #[test]
+fn semantic_terminal_attach_acquires_and_releases_the_shared_owner_and_resize_lock() {
+    with_terminal_session_test_server(|server, terminal_id, terminal_id_string, public_pane_id| {
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellConnected {
+                surface_reuse: false,
+                surface_delta: false,
+                client_id: 7,
+                surface_cols: 100,
+                surface_rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                pixel_mouse: false,
+                direct_graphics: false,
+                endpoint_keybindings: false,
+                mouse_capture: true,
+                surface_active: true,
+                writer,
+            })
+        );
+        let _initial = client_shell_snapshot(&control_rx);
+        let boot_id = server.client_shell_boot_id.clone();
+
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+                client_id: 7,
+                boot_id: boot_id.clone(),
+                request: Box::new(api::schema::Request {
+                    id: "terminal-attach:1".into(),
+                    method: api::schema::Method::TerminalAttach(
+                        api::schema::TerminalAttachParams {
+                            terminal_id: terminal_id_string.clone(),
+                            takeover: false,
+                        },
+                    ),
+                }),
+            },)
+        );
+
+        assert_eq!(
+            server.terminal_attach_owners.get(&terminal_id_string),
+            Some(&7)
+        );
+        assert!(server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .contains(&terminal_id));
+
+        let ServerMessage::ClientShellEndpointResponseChunk {
+            boot_id: response_boot_id,
+            request_id,
+            final_chunk,
+            data,
+        } = read_server_message(control_rx.recv().expect("terminal attach response"))
+        else {
+            panic!("expected terminal attach response");
+        };
+        assert_eq!(response_boot_id, boot_id);
+        assert_eq!(request_id, "terminal-attach:1");
+        assert!(final_chunk);
+        let response = serde_json::from_slice::<api::schema::SuccessResponse>(&data)
+            .expect("typed terminal attach response");
+        assert!(matches!(
+            response.result,
+            api::schema::ResponseResult::TerminalAttached {
+                pane_id,
+                projection_revision: 2,
+            } if pane_id == public_pane_id
+        ));
+
+        assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 7 }));
+        assert!(!server
+            .terminal_attach_owners
+            .contains_key(&terminal_id_string));
+        assert!(!server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .contains(&terminal_id));
+    });
+}
+
+#[test]
+fn semantic_terminal_attach_rejects_a_second_target_without_leaking_the_first_owner() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let _runtime_guard = rt.enter();
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("attached");
+    let first_pane = workspace.tabs[0].root_pane;
+    let second_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let first_terminal = workspace.terminal_id(first_pane).unwrap().clone();
+    let second_terminal = workspace.terminal_id(second_pane).unwrap().clone();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.ensure_test_terminals();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            client_id: 7,
+            surface_cols: 100,
+            surface_rows: 30,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: true,
+            surface_active: true,
+            writer,
+        })
+    );
+    let initial = client_shell_snapshot(&control_rx);
+    let attach = |id: &str, terminal_id: String| ServerEvent::ClientShellEndpointRequest {
+        client_id: 7,
+        boot_id: initial.boot_id.clone(),
+        request: Box::new(api::schema::Request {
+            id: id.into(),
+            method: api::schema::Method::TerminalAttach(api::schema::TerminalAttachParams {
+                terminal_id,
+                takeover: false,
+            }),
+        }),
+    };
+
+    assert!(server.handle_server_event(attach("first", first_terminal.to_string())));
+    let _first_response = read_server_message(control_rx.recv().expect("first attach response"));
+    assert!(!server.handle_server_event(attach("second", second_terminal.to_string())));
+    let ServerMessage::ClientShellEndpointResponseChunk { data, .. } =
+        read_server_message(control_rx.recv().expect("second attach response"))
+    else {
+        panic!("expected second attach response");
+    };
+    let error = serde_json::from_slice::<api::schema::ErrorResponse>(&data)
+        .expect("second attach rejection");
+    assert_eq!(error.error.code, "terminal_attach_failed");
+    assert_eq!(
+        server.terminal_attach_owners.get(first_terminal.as_str()),
+        Some(&7)
+    );
+    assert!(!server
+        .terminal_attach_owners
+        .contains_key(second_terminal.as_str()));
+    assert!(server
+        .app
+        .state
+        .direct_attach_resize_locks
+        .contains(&first_terminal));
+    assert!(!server
+        .app
+        .state
+        .direct_attach_resize_locks
+        .contains(&second_terminal));
+
+    drop(server);
+    drop(_runtime_guard);
+    rt.shutdown_timeout(Duration::from_millis(100));
+}
+
+#[test]
+fn inactive_semantic_attach_probe_resizes_only_its_target_when_attached() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let _runtime_guard = rt.enter();
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("attached");
+    let attached_pane = workspace.tabs[0].root_pane;
+    let sibling_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let attached_terminal = workspace.terminal_id(attached_pane).unwrap().clone();
+    let sibling_terminal = workspace.terminal_id(sibling_pane).unwrap().clone();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.ensure_test_terminals();
+    server.app.terminal_runtimes.insert(
+        attached_terminal.clone(),
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, b""),
+    );
+    server.app.terminal_runtimes.insert(
+        sibling_terminal.clone(),
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 12, b""),
+    );
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            client_id: 7,
+            surface_cols: 100,
+            surface_rows: 30,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: true,
+            surface_active: false,
+            writer,
+        })
+    );
+    let initial = client_shell_snapshot(&control_rx);
+    assert_eq!(
+        server
+            .app
+            .terminal_runtimes
+            .get(&attached_terminal)
+            .unwrap()
+            .current_size(),
+        (12, 40)
+    );
+    assert_eq!(
+        server
+            .app
+            .terminal_runtimes
+            .get(&sibling_terminal)
+            .unwrap()
+            .current_size(),
+        (12, 40)
+    );
+
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id: 7,
+            boot_id: initial.boot_id.clone(),
+            request: Box::new(api::schema::Request {
+                id: "attach".into(),
+                method: api::schema::Method::TerminalAttach(api::schema::TerminalAttachParams {
+                    terminal_id: attached_terminal.to_string(),
+                    takeover: false,
+                }),
+            }),
+        })
+    );
+
+    assert!(server.clients[&7].shell_surface_active);
+    assert_eq!(
+        server
+            .app
+            .terminal_runtimes
+            .get(&attached_terminal)
+            .unwrap()
+            .current_size(),
+        (30, 100)
+    );
+    assert_eq!(
+        server
+            .app
+            .terminal_runtimes
+            .get(&sibling_terminal)
+            .unwrap()
+            .current_size(),
+        (12, 40)
+    );
+    assert!(server
+        .tab_geometry_controllers
+        .values()
+        .all(|owner| *owner != 7));
+
+    drop(server);
+    drop(_runtime_guard);
+    rt.shutdown_timeout(Duration::from_millis(100));
+}
+
+#[test]
+fn semantic_terminal_attach_projects_and_resizes_one_full_size_pane_at_the_acknowledged_revision() {
+    with_terminal_session_test_server(|server, terminal_id, terminal_id_string, public_pane_id| {
+        let (writer, control_rx, render_rx) = test_client_writer();
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellConnected {
+                surface_reuse: false,
+                surface_delta: false,
+                client_id: 7,
+                surface_cols: 100,
+                surface_rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                pixel_mouse: false,
+                direct_graphics: false,
+                endpoint_keybindings: false,
+                mouse_capture: true,
+                surface_active: true,
+                writer,
+            })
+        );
+        let initial = client_shell_snapshot(&control_rx);
+        let boot_id = initial.boot_id.clone();
+
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+                client_id: 7,
+                boot_id: boot_id.clone(),
+                request: Box::new(api::schema::Request {
+                    id: "terminal-attach:projection".into(),
+                    method: api::schema::Method::TerminalAttach(
+                        api::schema::TerminalAttachParams {
+                            terminal_id: terminal_id_string,
+                            takeover: false,
+                        },
+                    ),
+                }),
+            },)
+        );
+        let ServerMessage::ClientShellEndpointResponseChunk { data, .. } =
+            read_server_message(control_rx.recv().expect("terminal attach response"))
+        else {
+            panic!("expected terminal attach response");
+        };
+        let response = serde_json::from_slice::<api::schema::SuccessResponse>(&data)
+            .expect("typed terminal attach response");
+        let api::schema::ResponseResult::TerminalAttached {
+            projection_revision,
+            ..
+        } = response.result
+        else {
+            panic!("expected terminal attached result");
+        };
+
+        server.render_and_stream();
+
+        let snapshot = client_shell_snapshot(&control_rx);
+        assert_eq!(snapshot.revision, projection_revision);
+        assert_eq!(
+            snapshot.focused_pane_id.as_deref(),
+            Some(public_pane_id.as_str())
+        );
+        let surface = recv_pane_surface(&render_rx, "attached terminal surface");
+        assert_eq!(surface.projection_revision, projection_revision);
+        assert_eq!(surface.panes.len(), 1);
+        assert_eq!(surface.panes[0].pane_id, public_pane_id);
+        assert_eq!(
+            surface.panes[0].rect,
+            crate::protocol::SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30,
+            }
+        );
+        assert_eq!(surface.panes[0].inner_rect, surface.panes[0].rect);
+        assert!(surface.panes[0].focused);
+        assert!(surface.splits.is_empty());
+        assert!(surface.popup.is_none());
+
+        assert!(server.handle_server_event(ServerEvent::ClientShellResize {
+            client_id: 7,
+            surface_cols: 120,
+            surface_rows: 40,
+            cell_width_px: 10,
+            cell_height_px: 16,
+            pixel_mouse: false,
+        }));
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .pixel_size(),
+            Some((1200, 640))
+        );
+    });
+}
+
+#[test]
 fn explicit_agent_history_read_requires_idle_on_alternate_screen() {
     with_terminal_session_test_server(
         |server, terminal_id, _terminal_id_string, public_pane_id| {
@@ -4338,6 +4708,135 @@ fn direct_terminal_observer_keeps_hidden_pty_source_renderable_with_client_shell
     assert!(server.app.render_dirty.request_pty(background_pane));
     assert!(server.has_pending_presentation_work(false, false));
     assert!(server.app.render_dirty.request_pty(hidden_pane));
+}
+
+#[test]
+fn semantic_terminal_attach_only_keeps_its_one_pane_render_visible() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let runtime_guard = rt.enter();
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("attached");
+    let attached_pane = workspace.tabs[0].root_pane;
+    let sibling_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    workspace.tabs[0].layout.focus_pane(sibling_pane);
+    let attached_terminal = workspace
+        .terminal_id(attached_pane)
+        .expect("attached terminal id")
+        .clone();
+    let sibling_terminal = workspace
+        .terminal_id(sibling_pane)
+        .expect("sibling terminal id")
+        .clone();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.ensure_test_terminals();
+    server.app.terminal_runtimes.insert(
+        attached_terminal.clone(),
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b""),
+    );
+    server.app.terminal_runtimes.insert(
+        sibling_terminal,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b""),
+    );
+    let (control_rx, _render_rx) = connect_matching_test_shell(&mut server, 7);
+    server.clients.get_mut(&7).unwrap().shell_presentation = Some(
+        crate::server::clients::ClientShellPresentation::AttachedTerminal {
+            terminal_id: attached_terminal.to_string(),
+        },
+    );
+
+    assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([attached_pane])));
+    assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([sibling_pane])));
+    assert!(server.shell_client_views_pane(7, 0, attached_pane));
+    assert!(!server.shell_client_views_pane(7, 0, sibling_pane));
+    assert_eq!(
+        server.shell_focus_target(7).map(|target| target.pane_id),
+        Some(attached_pane)
+    );
+    write_shared_test_pane(&mut server, sibling_pane, b"\x1b[?1000h");
+    assert!(server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, sibling_pane)
+        .expect("sibling runtime")
+        .mouse_reporting_enabled());
+    server.stream_host_mouse_capture_mode();
+    assert!(
+        std::iter::from_fn(|| control_rx.recv_timeout(Duration::from_millis(100)).ok())
+            .take(8)
+            .map(read_server_message)
+            .any(|message| {
+                matches!(
+                    message,
+                    ServerMessage::MouseCapture {
+                        enabled: false,
+                        sgr_pixels: false
+                    }
+                )
+            })
+    );
+
+    server.sync_immediate_pty_sources();
+    assert!(server.app.render_dirty.request_pty(attached_pane));
+    assert!(!server.app.render_dirty.request_pty(sibling_pane));
+
+    server.tab_geometry_controllers.clear();
+    assert!(!server.claim_shell_tab_geometry(7, false));
+
+    drop(server);
+    drop(runtime_guard);
+    rt.shutdown_timeout(Duration::from_millis(100));
+}
+
+#[test]
+fn attached_selection_read_does_not_change_session_focus() {
+    let mut server = test_headless_server();
+    let first = crate::workspace::Workspace::test_new("first");
+    let second = crate::workspace::Workspace::test_new("attached");
+    let attached_pane = second.tabs[0].root_pane;
+    let attached_terminal_id = second
+        .terminal_id(attached_pane)
+        .expect("attached terminal id")
+        .to_string();
+    server.app.state.workspaces = vec![first, second];
+    server.app.state.active = Some(0);
+    server.app.state.ensure_test_terminals();
+    let (_control_rx, _render_rx) = connect_matching_test_shell(&mut server, 7);
+    server.clients.get_mut(&7).unwrap().shell_presentation = Some(
+        crate::server::clients::ClientShellPresentation::AttachedTerminal {
+            terminal_id: attached_terminal_id,
+        },
+    );
+    let public_pane_id = server
+        .app
+        .public_pane_id(1, attached_pane)
+        .expect("public pane id");
+    let (respond_to, _response_rx) = std::sync::mpsc::channel();
+
+    server.handle_client_shell_api_request(
+        7,
+        api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "selection".into(),
+                method: api::schema::Method::PaneSelectionReadJoined(
+                    api::schema::PaneSelectionReadParams {
+                        pane_id: public_pane_id,
+                        anchor: api::schema::PaneTextPoint { row: 0, col: 0 },
+                        cursor: api::schema::PaneTextPoint { row: 0, col: 1 },
+                        content_revision: None,
+                    },
+                ),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        },
+    );
+
+    assert_eq!(server.app.state.active, Some(0));
 }
 
 #[test]
@@ -4855,7 +5354,7 @@ fn terminal_attach_client_exits_when_worktree_runtime_restore_fails() {
             Some(crate::detect::Agent::Codex),
             crate::detect::AgentState::Working,
         );
-    let terminal_id = terminal_id.to_string();
+    let terminal_id_string = terminal_id.to_string();
     let (writer, control_rx, _render_rx) = test_client_writer();
 
     assert!(!server.handle_server_event(ServerEvent::ClientConnected {
@@ -4870,11 +5369,14 @@ fn terminal_attach_client_exits_when_worktree_runtime_restore_fails() {
     assert!(
         server.handle_server_event(ServerEvent::ClientAttachTerminal {
             client_id: 7,
-            terminal_id: terminal_id.clone(),
+            terminal_id: terminal_id_string.clone(),
             takeover: false,
         })
     );
-    assert_eq!(server.terminal_attach_owners.get(&terminal_id), Some(&7));
+    assert_eq!(
+        server.terminal_attach_owners.get(&terminal_id_string),
+        Some(&7)
+    );
     server
         .app
         .pending_worktree_remove_runtime_exits
@@ -4892,9 +5394,96 @@ fn terminal_attach_client_exits_when_worktree_runtime_restore_fails() {
     );
 
     assert!(!server.clients.contains_key(&7));
-    assert!(!server.terminal_attach_owners.contains_key(&terminal_id));
+    assert!(!server
+        .terminal_attach_owners
+        .contains_key(&terminal_id_string));
+    assert!(!server
+        .app
+        .state
+        .direct_attach_resize_locks
+        .contains(&terminal_id));
     let reason = read_server_shutdown_reason(control_rx.recv().expect("shutdown message"));
-    assert_eq!(reason, Some(format!("terminal {terminal_id} exited")));
+    assert_eq!(
+        reason,
+        Some(format!("terminal {terminal_id_string} exited"))
+    );
+}
+
+#[test]
+fn semantic_terminal_attach_exits_and_releases_resize_lock_when_target_disappears() {
+    let mut server = test_headless_server();
+    let workspace = crate::workspace::Workspace::test_new("attached");
+    let pane_id = workspace.tabs[0].root_pane;
+    let terminal_id = workspace
+        .terminal_id(pane_id)
+        .cloned()
+        .expect("terminal id");
+    let terminal_id_string = terminal_id.to_string();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            client_id: 7,
+            surface_cols: 100,
+            surface_rows: 30,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: true,
+            surface_active: true,
+            writer,
+        })
+    );
+    let initial = client_shell_snapshot(&control_rx);
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id: 7,
+            boot_id: initial.boot_id,
+            request: Box::new(api::schema::Request {
+                id: "terminal-attach:target-loss".into(),
+                method: api::schema::Method::TerminalAttach(api::schema::TerminalAttachParams {
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: false,
+                }),
+            }),
+        })
+    );
+    let _ = control_rx.recv().expect("terminal attach response");
+    server
+        .app
+        .pending_worktree_remove_runtime_exits
+        .insert(pane_id, 1);
+    server
+        .app
+        .pending_worktree_remove_runtime_restores
+        .insert(pane_id, 7);
+
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::WorktreeRuntimeRestoreFailed {
+            pane_id,
+            operation_id: 7,
+        })
+    );
+
+    assert!(!server.clients.contains_key(&7));
+    assert!(!server
+        .terminal_attach_owners
+        .contains_key(&terminal_id_string));
+    assert!(!server
+        .app
+        .state
+        .direct_attach_resize_locks
+        .contains(&terminal_id));
+    let reason = read_server_shutdown_reason(control_rx.recv().expect("shutdown message"));
+    assert_eq!(
+        reason,
+        Some(format!("terminal {terminal_id_string} exited"))
+    );
 }
 
 #[test]

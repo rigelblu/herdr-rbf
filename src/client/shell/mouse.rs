@@ -2242,12 +2242,14 @@ impl ClientShellState {
                             ));
                         }
                     }
-                    self.push_endpoint_method(
-                        crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
-                            pane_id: hit.pane_id,
-                        }),
-                        outcome,
-                    );
+                    if !self.config.attached_terminal {
+                        self.push_endpoint_method(
+                            crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
+                                pane_id: hit.pane_id,
+                            }),
+                            outcome,
+                        );
+                    }
                 }
             }
             MouseEventKind::Down(MouseButton::Middle) => {

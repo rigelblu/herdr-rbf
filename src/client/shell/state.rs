@@ -5,6 +5,63 @@ pub(super) const NEW_TAB_WIDTH: u16 = 3;
 pub(super) const WORKSPACE_HEADER_ROWS: u16 = 2;
 const ENDPOINT_ERROR_TIMEOUT_SECS: u64 = 5;
 
+fn pane_surface_row<'a>(
+    surface: &'a PaneSurfaceFrame,
+    pane: &crate::protocol::PaneSurfacePane,
+    absolute_row: u32,
+) -> Option<&'a [crate::protocol::CellData]> {
+    let viewport_top = pane
+        .scroll
+        .map(|scroll| {
+            scroll
+                .max_offset_from_bottom
+                .saturating_sub(scroll.offset_from_bottom) as u32
+        })
+        .unwrap_or(0);
+    let viewport_row = u16::try_from(absolute_row.checked_sub(viewport_top)?).ok()?;
+    if viewport_row >= pane.inner_rect.height {
+        return None;
+    }
+    let start = (usize::from(pane.inner_rect.y) + usize::from(viewport_row))
+        * usize::from(surface.frame.width)
+        + usize::from(pane.inner_rect.x);
+    surface
+        .frame
+        .cells
+        .get(start..start + usize::from(pane.inner_rect.width))
+}
+
+fn selection_cells_unchanged(
+    selection: &crate::selection::Selection<String>,
+    previous_surface: &PaneSurfaceFrame,
+    previous_pane: &crate::protocol::PaneSurfacePane,
+    next_surface: &PaneSurfaceFrame,
+    next_pane: &crate::protocol::PaneSurfacePane,
+) -> bool {
+    let ((start_row, start_col), (end_row, end_col)) = selection.ordered_cells();
+    (start_row..=end_row).all(|row| {
+        let first_col = if row == start_row { start_col } else { 0 };
+        let last_col = if row == end_row {
+            end_col
+        } else {
+            previous_pane.inner_rect.width.saturating_sub(1)
+        };
+        pane_surface_row(previous_surface, previous_pane, row)
+            .zip(pane_surface_row(next_surface, next_pane, row))
+            .and_then(|(previous, next)| {
+                previous
+                    .get(usize::from(first_col)..=usize::from(last_col))
+                    .zip(next.get(usize::from(first_col)..=usize::from(last_col)))
+            })
+            .is_some_and(|(previous, next)| {
+                previous
+                    .iter()
+                    .zip(next)
+                    .all(|(previous, next)| previous.symbol == next.symbol)
+            })
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClientShellKeybindingSource {
     Local,
@@ -13,6 +70,7 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) attached_terminal: bool,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_min_width: u16,
     pub(super) sidebar_max_width: u16,
@@ -899,6 +957,8 @@ pub(crate) struct ClientShellState {
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
     pub(super) url_click_consumes_until_up: bool,
     pub(super) replaying_url_click: bool,
+    pub(super) attached_prefix: Option<crate::input::TerminalKey>,
+    pub(super) attached_literal_prefix_pressed: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
     pub(super) last_pane_click: Option<ClientPaneClick>,
     pub(super) selection_autoscroll: Option<ClientSelectionAutoscroll>,
@@ -977,8 +1037,7 @@ impl ClientShellState {
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();
-        let overlay = config
-            .startup_onboarding
+        let overlay = (!config.attached_terminal && config.startup_onboarding)
             .then_some(ClientShellOverlay::Onboarding);
         let sidebar_shape = super::sidebar_shape::SidebarShapeState::from_preferences(
             &preferences,
@@ -1068,6 +1127,8 @@ impl ClientShellState {
             link_hover: None,
             url_click_consumes_until_up: false,
             replaying_url_click: false,
+            attached_prefix: None,
+            attached_literal_prefix_pressed: false,
             selection: None,
             last_pane_click: None,
             selection_autoscroll: None,
@@ -1201,6 +1262,14 @@ impl ClientShellState {
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
+        if self.config.attached_terminal {
+            return ClientShellLayout {
+                sidebar: Rect::default(),
+                tab_bar: Rect::default(),
+                mobile_header: Rect::default(),
+                pane_surface: Rect::new(0, 0, cols, rows),
+            };
+        }
         self.config.layout(
             cols,
             rows,
@@ -1213,6 +1282,12 @@ impl ClientShellState {
     }
 
     pub(crate) fn surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
+        if self.config.attached_terminal {
+            return ClientSurfaceSize {
+                cols: cols.max(1),
+                rows: rows.max(1),
+            };
+        }
         let surface = self.layout(cols, rows).pane_surface;
         ClientSurfaceSize {
             cols: surface.width.max(1),
@@ -1514,7 +1589,7 @@ impl ClientShellState {
         self.pane_scroll_targets
             .retain(|pane_id, _| pane_exists(pane_id));
 
-        if !self.config.startup_onboarding {
+        if !self.config.attached_terminal && !self.config.startup_onboarding {
             match snapshot.product_announcement.as_ref() {
                 Some(announcement) => {
                     let key = (announcement.version.clone(), announcement.id.clone());
@@ -1699,7 +1774,18 @@ impl ClientShellState {
             Some(gesture) => Some(&gesture.pane_id),
             None => self.selection.as_ref().map(|selection| &selection.pane_id),
         };
-        let selection_invalidated = selection_pane.is_some_and(|pane_id| {
+        let selection_mouse_owner_changed = selection_pane.is_some_and(|pane_id| {
+            let Some(previous_surface) = self.pane_surface.as_ref() else {
+                return false;
+            };
+            previous_surface
+                .panes
+                .iter()
+                .find(|pane| &pane.pane_id == pane_id)
+                .zip(surface.panes.iter().find(|pane| &pane.pane_id == pane_id))
+                .is_some_and(|(previous, next)| !previous.mouse_reporting && next.mouse_reporting)
+        });
+        let selection_content_changed = selection_pane.is_some_and(|pane_id| {
             let Some(previous_surface) = self.pane_surface.as_ref() else {
                 return false;
             };
@@ -1718,12 +1804,43 @@ impl ClientShellState {
                 // cache content-dependent boundaries that output can invalidate.
                 || (self.word_selection_gesture.is_some()
                     && previous.content_revision != next.content_revision)
+                // An attached agent tab redraws in place, so a selection whose
+                // cells changed no longer shows what was selected.
+                || (self.config.attached_terminal
+                    && previous.content_revision != next.content_revision
+                    && self.selection.as_ref().is_some_and(|selection| {
+                        !selection_cells_unchanged(
+                            selection,
+                            previous_surface,
+                            previous,
+                            &surface,
+                            next,
+                        )
+                    }))
         });
-        if selection_invalidated {
+        if selection_content_changed || selection_mouse_owner_changed {
             self.word_selection_gesture = None;
             self.selection = None;
             self.stop_selection_autoscroll();
             self.selection_highlight_clear_deadline = None;
+            if self.config.attached_terminal
+                && selection_content_changed
+                && !selection_mouse_owner_changed
+            {
+                self.show_selection_changed_feedback();
+            }
+        }
+        if self.config.attached_terminal
+            && self.pane_surface.as_ref().is_some_and(|previous_surface| {
+                previous_surface.panes.iter().any(|previous| {
+                    surface.panes.iter().any(|next| {
+                        previous.pane_id == next.pane_id
+                            && previous.mouse_reporting != next.mouse_reporting
+                    })
+                })
+            })
+        {
+            self.pane_mouse_gesture = None;
         }
         for pane in &surface.panes {
             let Some(target) = self.pane_scroll_targets.get(&pane.pane_id).copied() else {
@@ -1831,6 +1948,14 @@ impl ClientShellState {
         self.copy_feedback = Some(crate::app::state::CopyFeedback { message });
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true
+    }
+
+    fn show_selection_changed_feedback(&mut self) {
+        self.copy_feedback = Some(crate::app::state::CopyFeedback {
+            message: "selection changed · drag again".to_owned(),
+        });
+        self.copy_feedback_deadline =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
     }
 
     pub(crate) fn tick_copy_feedback(&mut self, now: std::time::Instant) -> bool {

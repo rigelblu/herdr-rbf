@@ -307,6 +307,9 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         outcome.repaint |= self.clear_link_hover();
+        if self.config.attached_terminal && self.handle_attached_escape(&key, outcome) {
+            return;
+        }
         if self.copy_operation_in_flight {
             self.copy_input_queue.push_back(key);
             return;
@@ -349,6 +352,52 @@ impl ClientShellState {
                 }
             }
         }
+    }
+
+    fn handle_attached_escape(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let is_prefix = key.code == KeyCode::Char('b') && key.modifiers == KeyModifiers::CONTROL;
+        if self.attached_literal_prefix_pressed && is_prefix && key.kind == KeyEventKind::Release {
+            if let Some(pane_id) = self.focused_pane_id() {
+                self.push_pane_key(ClientInputTarget::Pane(pane_id), key.clone(), outcome);
+            }
+            self.attached_literal_prefix_pressed = false;
+            return true;
+        }
+        if let Some(prefix) = self.attached_prefix.take() {
+            if is_prefix && key.kind == KeyEventKind::Release {
+                self.attached_prefix = Some(prefix);
+                return true;
+            }
+            if key.code == KeyCode::Char('q')
+                && key.modifiers.is_empty()
+                && key.kind == KeyEventKind::Press
+            {
+                outcome.detach = true;
+                return true;
+            }
+            if is_prefix && key.kind == KeyEventKind::Press {
+                if let Some(pane_id) = self.focused_pane_id() {
+                    self.push_pane_key(ClientInputTarget::Pane(pane_id), key.clone(), outcome);
+                }
+                self.attached_literal_prefix_pressed = true;
+                return true;
+            }
+            if let Some(pane_id) = self.focused_pane_id() {
+                let target = ClientInputTarget::Pane(pane_id);
+                self.push_pane_key(target.clone(), prefix.clone(), outcome);
+                self.push_pane_key(target, prefix.with_kind(KeyEventKind::Release), outcome);
+            }
+            return false;
+        }
+        if is_prefix && key.kind == KeyEventKind::Press {
+            self.attached_prefix = Some(key.clone());
+            return true;
+        }
+        false
     }
 
     fn release_input_leases(&mut self, outcome: &mut ClientShellInput) {
@@ -559,6 +608,9 @@ impl ClientShellState {
             self.stop_selection_autoscroll();
             self.selection_highlight_clear_deadline = None;
             outcome.repaint = true;
+        }
+        if self.config.attached_terminal {
+            return self.focused_pane_id().map(ClientInputTarget::Pane);
         }
 
         match self.mode {

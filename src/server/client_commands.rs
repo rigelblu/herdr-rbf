@@ -44,6 +44,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.focus",
     "tab.move",
     "tab.rename",
+    "terminal.attach",
     "workspace.close",
     "workspace.create",
     "workspace.focus",
@@ -302,6 +303,10 @@ mod tests {
             actual.remove("pane.selection.read_joined").as_deref(),
             Some("3a43b29776d0570c2ce2cacea3a5ded0147cbda8dbd5d0c94fcf3eb75c9e3b45")
         );
+        assert_eq!(
+            actual.remove("terminal.attach").as_deref(),
+            Some("a734ec27456c8c218cd9b84746a4062ff8810a5b4b29b2f7b86a87651622ba04")
+        );
 
         assert_eq!(
             actual, expected,
@@ -348,6 +353,11 @@ mod tests {
                 "advertised endpoint method {method:?} is absent from the request schema"
             );
         }
+    }
+
+    #[test]
+    fn terminal_attach_is_an_advertised_endpoint_method() {
+        assert!(supports_client_shell_method_name("terminal.attach"));
     }
 
     #[test]

@@ -344,11 +344,9 @@ fn direct_attach_initial_mouse_capture_follows_config() {
         "direct attach must enable host bracketed paste; output: {:?}",
         read_output(&output)
     );
-    assert!(
-        !read_output(&output).contains("\x1b[?u"),
-        "direct attach must not query rendered-client keyboard state; output: {:?}",
-        read_output(&output)
-    );
+    // herdr-rbf: `terminal attach` to a server with `terminal.attach` runs the rendered
+    // client, which answers its own keyboard-state query, so upstream's no-`\x1b[?u`
+    // check for the byte-stream attach doesn't apply here.
 
     let restore_watermark = output_len(&output);
     attach
