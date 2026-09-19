@@ -1,0 +1,830 @@
+#!/bin/zsh -f
+# herdr-agent — run an agent's TUI inside herdr, so the agent keeps running when the
+# terminal that started it closes, and you can open it from any device.
+#
+# It runs through links named after each agent, in .local/share/herdr-agent/bin/:
+#   claude, codex  cmux's wrappers add their hooks, then run the link named in
+#                  CMUX_CUSTOM_CLAUDE_PATH / CMUX_CUSTOM_CODEX_PATH (set in .zshrc)
+#   pi, agy        the pi() and agy() functions in .zshrc run the link
+# The link's name matters: cmux's restore only goes through its wrapper when the
+# recorded program carries the agent's own name.
+#
+# Each launch
+#   1. runs the agent right here when herdr-agent is off, the terminal isn't
+#      interactive, it's already inside herdr, or it's a one-shot or a subcommand
+#   2. picks the herdr session named after this checkout (my.repo.main -> my-repo-main)
+#   3. starts that session's server if needed, in its own process session
+#   4. attaches instead when a resumed session already runs in herdr
+#   5. opens a herdr tab whose shell turns into the agent (the hook at the top of
+#      .zshenv), carrying this terminal's exact environment and arguments
+#   6. replaces itself with the attach, so cmux keeps the process ID it recorded
+#
+# Commands
+#   herdr-agent on | off | status   the switch; off runs every agent right here
+#   herdr-agent session [dir]       the herdr session a folder's agents go to
+#   herdr-agent ps [session]        the agents in herdr: session, pane, agent, status, tab name
+#                                   (see one: herdr --session S pane read PANE --source visible)
+#   herdr-agent attach [session pane]  show a running agent in this terminal (none given: pick one);
+#                                   it moves here from any other tab showing it
+#   herdr-agent attach --remote <ssh-target> [herdr options]
+#                                   herdr --remote, noted so the tab comes back after a cmux
+#                                   restart; in a cmux tab, `herdr --remote …` runs this
+#   herdr-agent attach --restore    what cmux runs after a restart: this tab's pane, or its
+#                                   remote herdr, again
+#   herdr-agent install             link herdr-agent into ~/.local/bin, add cmux's restart entry
+#   herdr-agent check               prove the herdr steps in a throwaway session
+#
+# Settings (environment)
+#   HERDR_AGENT=off | on       skip herdr for one command, or use it even when switched off
+#   HERDR_AGENT_SESSION=name   use this herdr session instead of the checkout's
+#   HERDR_AGENT_ATTACH=cmd     attach with `cmd <session> <terminal> <pane>`
+#                              instead of `herdr terminal attach`
+#   HERDR_AGENT_STATE_DIR=dir  keep the switch and tab notes here (the self-check uses it)
+#
+# Everyday use
+#   Start agents as usual: claude, codex, pi, agy. In a cmux tab they run in herdr,
+#   and the tab shows them. These stay in the tab instead:
+#     one-shot runs and subcommands (claude -p, --help, pi -p, agy --prompt, claude mcp)
+#     anything started inside a herdr pane
+#     claude and codex outside cmux (cmux's wrappers route them; pi and agy always go)
+#   In the tab, Ctrl+B then q detaches and the agent keeps running; Ctrl+B Ctrl+B sends
+#   Ctrl+B. For herdr's full view and keybindings: herdr session attach <session>
+#   After a cmux restart, a tab that showed an agent shows it again: cmux resumes the
+#   agent, or reruns `herdr-agent attach --restore` for tabs attached by hand, and for pi
+#   and agy. The launcher notes each tab's pane when it attaches; if that pane is gone
+#   (a reboot), the restore starts the agent's session again.
+#   A tab running `herdr --remote <host>` comes back too: the herdr function in .zshrc
+#   notes what it ran, and the restore runs it again. If the host can't be reached then,
+#   the tab shows ssh's reason and drops to its shell. Status from agents on the remote
+#   machine never reaches this cmux, so their tab comes back without it.
+#   Status and notifications follow the tab showing the agent, for claude: its hooks call
+#   cmux through share/herdr-agent/hook-cmux, which reads the note each attach leaves.
+#   codex, pi and agy can't be moved — each resolves cmux or its tab in a way nothing we
+#   set reaches (see route_hooks) — so their status stays on the tab they started in.
+#   An agent started before that existed keeps aiming at its first tab until you restart it.
+#   One agent shows in one tab at a time. herdr lets a pane have a single direct client,
+#   so herdr-agent attach takes the agent over from the tab showing it, whose view closes.
+#   To see it in a second place too (another tab, your phone), open herdr's full view
+#   there instead and go to its pane: herdr session attach <session>. Any number of those
+#   can run beside the tab. They show the agent but don't get its notifications, which
+#   follow the tab herdr-agent attached last.
+#   See what runs: herdr-agent ps. Show one in this tab: herdr-agent attach. The agent's
+#   own resume command works too
+#   (claude --resume <id or saved name>, codex resume <id>, pi --session <id>,
+#   agy --conversation <id>): it attaches when the session already runs. A saved name
+#   counts when exactly one of this folder's conversations has it (/rename sets it).
+#
+# Needs (herdr-agent status checks these)
+#   herdr and jq; the hook at the top of ~/.zshenv; the herdr-agent section of .zshrc
+#   cmux's socket in Automation mode (cmux Settings > Automation). pi's cmux extension
+#     drops cmux's access token, so cmux refuses its hooks from herdr in any stricter mode
+#   cmux's pi and agy integrations: cmux hooks pi install / cmux hooks agy install
+#   cmux's `herdr-agent-attach` restart entry in ~/.config/cmux/restart-commands.json
+#     (herdr-agent install adds it, backing the file up; approve it in cmux Settings)
+#
+# Known gaps
+#   An agent cmux saved before herdr-agent existed restores outside herdr, because cmux
+#     reuses the program path it saved. Exit it and start it again once. Same for a pi or
+#     agy session started before this launcher began claiming their launches.
+#   agy's hooks name cmux themselves, with nothing to point them elsewhere, so agy's
+#     status still goes to the tab it started in. Its status has also landed on another
+#     workspace's row; a process ID cmux recorded and something else reused explains that.
+#   cmux started from inside a herdr pane (an agent relaunching it, say) hands herdr's
+#     pane variables to every tab. .zshenv and herdr-agent ignore them when no herdr
+#     server is among a shell's parents, but other tools may not: start cmux from the Dock.
+#   Claude's own picker can still start a second live copy of a running conversation:
+#     a bare claude --resume, a name several conversations share, or /resume in Claude.
+#     herdr-agent ps shows copies as panes with the same tab name.
+
+emulate -R zsh
+# no_bg_nice: zsh would start the server at a lower priority, and every agent with it
+setopt extended_glob no_bg_nice
+zmodload zsh/system zsh/zselect zsh/parameter 2>/dev/null
+
+self=${0:A}
+invoked=${0:t}
+links=${self:h:h}/share/herdr-agent/bin
+hook_shim=${links:h}/hook-cmux
+state_dir=${HERDR_AGENT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent}
+# cmux reruns `herdr-agent attach --restore` after a restart in tabs whose foreground
+# process carries this marker (cmux-rbf restart commands, `~/.config/cmux`)
+restart_id=herdr-agent-attach
+cmux_restart_file=$HOME/.config/cmux/restart-commands.json
+herdr=${commands[herdr]:-$HOME/.local/bin/herdr}
+herdr_config=${XDG_CONFIG_HOME:-$HOME/.config}/herdr
+
+warn() { print -ru2 -- "herdr-agent: $*" }
+die() { warn "$@"; exit 1 }
+nap() { zselect -t ${1:-10} 2>/dev/null || true }  # centiseconds
+
+# herdr with a time limit, so a stuck server can't hang a launch;
+# a pane's inherited variables must not pick the socket
+herdr_cli() {
+  /usr/bin/perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' ${HERDR_AGENT_TIMEOUT:-15} \
+    /usr/bin/env -u HERDR_SOCKET_PATH -u HERDR_SESSION -u HERDR_ENV -u HERDR_PANE_ID \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_BIN_PATH -u HERDR_AGENT_LAUNCH \
+    $herdr "$@"
+}
+
+# herdr against one session
+h() {
+  local session=$1
+  shift
+  herdr_cli --session $session "$@"
+}
+
+# HERDR_ENV alone doesn't prove it: an app started from a herdr pane hands herdr's
+# pane variables to every terminal it opens. A herdr server among the parents does.
+inside_herdr() {
+  [[ -n ${HERDR_ENV:-} ]] || return 1
+  local pid=$PPID line
+  while (( pid > 1 )); do
+    line=$(/bin/ps -o ppid=,command= -p $pid 2>/dev/null) || return 1
+    [[ $line == *herdr(|\ --session\ *)\ server* ]] && return 0
+    pid=${${=line}[1]}
+  done
+  return 1
+}
+
+is_off() {
+  case ${HERDR_AGENT:-} in
+    (off) return 0 ;;
+    (on) return 1 ;;
+  esac
+  [[ -e $state_dir/off ]]
+}
+
+# The agent's own program: first on PATH, skipping these links and cmux's shims
+find_real() {
+  local agent=$1 dir candidate
+  if [[ -n ${HERDR_AGENT_CHECK_AGENT:-} ]]; then  # stand-in agent for herdr-agent check
+    print -r -- $HERDR_AGENT_CHECK_AGENT
+    return 0
+  fi
+  for dir in $path; do
+    [[ -n $dir && ${dir:A} != "${links:A}" ]] || continue
+    [[ $dir == */cmux-cli-shims/* || $dir == */Contents/Resources/bin ]] && continue
+    candidate=$dir/$agent
+    [[ -f $candidate && -x $candidate && ${candidate:A} != "$self" ]] || continue
+    print -r -- $candidate
+    return 0
+  done
+  return 1
+}
+
+# One-shot flags: the agent answers and exits, so it runs right here
+one_shot() {
+  case $1:$2 in
+    (claude:(-p|--print|--print=*|-h|--help|-v|--version|--bg|--background|--cloud|--cloud=*|--teleport|--teleport=*|--tmux|--tmux=*)) return 0 ;;
+    (codex:(-h|--help|-V|--version)) return 0 ;;
+    (pi:(-p|--print|-h|--help|-v|--version|--export|--export=*|--list-models|--list-models=*)) return 0 ;;
+    (agy:(-p|--print|--print=*|--prompt|--prompt=*|-h|--help|--version)) return 0 ;;
+  esac
+  return 1
+}
+
+# Options whose value is optional: the next word is the value unless it's an option
+takes_optional_value() {
+  case $1:$2 in
+    (claude:(-r|--resume|-d|--debug|--from-pr|--prompt-suggestions|--remote-control|-w|--worktree)) return 0 ;;
+  esac
+  return 1
+}
+
+# Options whose value is the next argument
+takes_value() {
+  case $1:$2 in
+    (claude:(--add-dir|--agent|--agents|--allowedTools|--allowed-tools|--append-system-prompt|--append-system-prompt-file|--autocompact|--betas|--debug-file|--disallowedTools|--disallowed-tools|--effort|--environment|--fallback-model|--file|--input-format|--json-schema|--max-budget-usd|--mcp-config|--model|-m|-n|--name|--output-format|--permission-mode|--permission-prompts|--permission-prompt-tool|--plugin-dir|--plugin-url|--remote-control-session-name-prefix|--session-id|--setting-sources|--settings|--system-prompt|--system-prompt-file|--system-prompt-snapshot|--tools)) return 0 ;;
+    (codex:(-c|--config|-m|--model|-p|--profile|-C|--cd|--remote|--remote-auth-token-env|-a|--ask-for-approval|-s|--sandbox|--output-last-message|--enable|--disable|-i|--image|--local-provider|--add-dir)) return 0 ;;
+    (pi:(--provider|--model|--api-key|--system-prompt|--append-system-prompt|--mode|--session|--session-id|--fork|--session-dir|-n|--name|--models|-t|--tools|-xt|--exclude-tools|--thinking|-e|--extension|--skill|--prompt-template|--theme|--use-theme|--tui-mode)) return 0 ;;
+    (agy:(--add-dir|--agent|--conversation|--effort|--input-format|--json-schema|--log-file|--mode|--model|--output-format|--print-timeout|--project|-i|--prompt-interactive)) return 0 ;;
+  esac
+  return 1
+}
+
+# The first word that isn't an option: a subcommand runs right here;
+# anything else is a prompt for an interactive session
+session_word() {
+  case $1:$2 in
+    (claude:(agents|attach|auth|auto-mode|config|api-key|daemon|doctor|experimental-next|gateway|import|install|kill|logs|mcp|plugin|plugins|project|rc|remote-control|respawn|rm|setup|setup-token|stop|ultrareview|update|upgrade)) return 1 ;;
+    (codex:(resume|fork)) return 0 ;;
+    (codex:(exec|e|review|login|logout|mcp|mcp-server|plugin|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|a|archive|delete|unarchive|cloud|exec-server|features|help|agents|queue|migrate-rollouts)) return 1 ;;
+    (pi:(install|remove|uninstall|update|list|config|auth)) return 1 ;;
+    (agy:(agent|agents|changelog|help|install|mcp|mic-serve|models|plugin|plugins|remote-control|update)) return 1 ;;
+  esac
+  return 0
+}
+
+# Is this an interactive session that belongs in herdr? The first plain word
+# decides subcommand or prompt; a one-shot flag anywhere makes it a one-shot,
+# except for agy, which stops reading options at its first plain word
+wants_herdr() {
+  local agent=$1
+  shift
+  local -a words=("$@")
+  local i=1 word next first=
+  while (( i <= $#words )); do
+    word=${words[i]}
+    next=${words[i+1]:-}
+    [[ $agent == agy && $word == -[^-]?* ]] && word=-$word  # agy takes -flag and --flag
+    case $word in
+      (--) break ;;
+      (--mode=*) [[ $agent == pi && ${word#--mode=} != text ]] && return 1 ;;
+      (-?*)
+        one_shot $agent $word && return 1
+        [[ $agent == pi && $word == --mode && $next != text ]] && return 1
+        if [[ $word != *=* ]]; then
+          if takes_value $agent $word; then
+            (( i++ ))
+          elif takes_optional_value $agent $word && [[ -n $next && $next != -* ]]; then
+            (( i++ ))
+          fi
+        fi
+        ;;
+      (*)
+        [[ -z $first ]] && first=$word
+        [[ $agent == agy ]] && break
+        ;;
+    esac
+    (( i++ ))
+  done
+  [[ -z $first ]] || session_word $agent $first
+}
+
+# The session ID a launch resumes, if any (a fork makes a new session, so none)
+resume_id() {
+  local agent=$1
+  shift
+  local -a words=("$@")
+  local i=1 word id= fork=0 after_resume=0
+  while (( i <= $#words )); do
+    word=${words[i]}
+    [[ $agent == agy && $word == -[^-]?* ]] && word=-$word
+    case $agent:$word in
+      (claude:--fork-session|pi:--fork|pi:--fork=*|codex:--last) fork=1 ;;
+      (claude:(-r|--resume)|pi:(--session|--session-id)|agy:--conversation)
+        if [[ -n ${words[i+1]:-} && ${words[i+1]} != -* ]]; then
+          id=${words[i+1]}
+          (( i++ ))
+        fi
+        ;;
+      (claude:--resume=*|pi:--session=*|pi:--session-id=*|agy:--conversation=*) id=${word#*=} ;;
+      (codex:resume) after_resume=1 ;;
+      (codex:-*) [[ $word != *=* ]] && takes_value codex $word && (( i++ )) ;;
+      (codex:*) (( after_resume )) && [[ -z $id ]] && id=$word ;;
+      (agy:[^-]*) break ;;  # agy reads no options after its first plain word
+      (*:-*) [[ $word != *=* ]] && takes_value $agent $word && (( i++ )) ;;
+    esac
+    (( i++ ))
+  done
+  (( fork )) || print -r -- $id
+}
+
+running_sessions() {
+  herdr_cli session list --json 2>/dev/null | jq -r '.sessions[] | select(.running) | .name'
+}
+
+# the one conversation of this folder whose saved name (/rename) contains the text,
+# found in Claude's transcripts; nothing when none or several match
+claude_named_session() {
+  local term=${(L)1} dir line file title
+  local -a lines matches
+  local -A names
+  dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${${PWD:A}//[^A-Za-z0-9]/-}
+  [[ -n $term && -d $dir ]] || return 1
+  if (( $+commands[rg] )); then
+    lines=(${(f)"$(rg --no-heading --with-filename --no-line-number --max-depth 1 \
+      --glob '*.jsonl' -F '"type":"custom-title"' -- $dir 2>/dev/null)"})
+  else
+    lines=(${(f)"$(grep -H -F '"type":"custom-title"' -- $dir/*.jsonl(N) /dev/null 2>/dev/null)"})
+  fi
+  # a file lists its renames in order, so its last name is its current one
+  for line in $lines; do
+    file=${line%%:\{*}
+    names[${file:t:r}]=${line#*:}
+  done
+  for file title in ${(kv)names}; do
+    title=$(jq -r '.customTitle // empty' <<<$title 2>/dev/null)
+    [[ -n $title && ${(L)title} == *"$term"* ]] && matches+=($file)
+  done
+  (( $#matches == 1 )) && print -r -- $matches[1]
+}
+
+# "<session> <terminal> <pane>" of a running agent with this session ID
+find_running() {
+  local id=$1 session found
+  local -a sessions
+  sessions=(${(f)"$(running_sessions)"})
+  for session in $sessions; do
+    found=$(h $session agent list 2>/dev/null | jq -r --arg id $id '
+      first(.result.agents[]
+        | select(.agent_session.value? as $v
+          | $v != null and ($v == $id or (($id | length) >= 8 and ($v | contains($id)))))
+        | "\(.terminal_id) \(.pane_id)") // empty')
+    if [[ -n $found ]]; then
+      print -r -- "$session $found"
+      return 0
+    fi
+  done
+  return 1
+}
+
+checkout_root() {
+  local dir=${1:A}
+  while [[ $dir != / ]]; do
+    if [[ -e $dir/.jj || -e $dir/.git ]]; then
+      print -r -- $dir
+      return 0
+    fi
+    dir=${dir:h}
+  done
+  print -r -- ${1:A}
+}
+
+# my.repo.main -> my-repo-main; herdr allows letters, digits, '.', '_' and '-'
+session_for() {
+  if [[ -n ${HERDR_AGENT_SESSION:-} ]]; then
+    print -r -- $HERDR_AGENT_SESSION
+    return
+  fi
+  local root name
+  root=$(checkout_root ${1:-$PWD})
+  if [[ $root == "${HOME:A}" ]]; then name=home; else name=${root:t}; fi
+  name=${${name:l}//[^a-z0-9_-]##/-}
+  name=${${name##-##}%%-##}
+  print -r -- ${${name[1,64]}:-agents}
+}
+
+server_running() { h $1 workspace list >/dev/null 2>&1 }
+
+# A clean server: every pane's shell rebuilds its environment from the dotfiles
+start_server() {
+  local session=$1 dir=$herdr_config/sessions/$1 var tries=100
+  local -a envs=(PATH=/usr/bin:/bin:/usr/sbin:/sbin)
+  for var in HOME USER LOGNAME SHELL TMPDIR SSH_AUTH_SOCK LANG LC_ALL LC_CTYPE \
+      __CF_USER_TEXT_ENCODING XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME; do
+    [[ -n ${(P)var:-} ]] && envs+=("$var=${(P)var}")
+  done
+  mkdir -p -- $dir || return 1
+  # Its own process session, so closing the terminal that started it can't hang it up
+  /usr/bin/env -i "${envs[@]}" /usr/bin/perl -MPOSIX -e \
+    'POSIX::setsid() or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' \
+    $herdr --session $session server </dev/null >>$dir/herdr-agent-server.log 2>&1 &!
+  until server_running $session; do
+    (( --tries > 0 )) || return 1
+    nap 10
+  done
+}
+
+# A one-time script for the new tab: it deletes itself, keeps the pane's herdr
+# variables and terminal type, restores this environment, then becomes the agent
+write_launch_file() {
+  local file=$1 real=$2
+  shift 2
+  local -a saved
+  saved=(${(0)"$(/usr/bin/env -0)"})
+  saved=(${saved:#(HERDR_(ENV|PANE_ID|TAB_ID|WORKSPACE_ID|SOCKET_PATH|SESSION|BIN_PATH|AGENT_LAUNCH)|TERM|COLORTERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|GHOSTTY_*|PWD|OLDPWD|SHLVL|_)=*})
+  local body
+  body=$(
+    print -r -- '#!/bin/zsh -f'
+    print -r -- '# herdr-agent launch file: runs once, deletes itself, then becomes the agent'
+    print -r -- 'rm -f -- "$0"'
+    print -r -- "saved=(${(j: :)${(@qqqq)saved}})"
+    print -r -- "args=(${(j: :)${(@qqqq)@}})"
+    print -r -- 'pane=(${(M)${(f)"$(/usr/bin/env)"}:#(HERDR_*|TERM|COLORTERM)=*})'
+    print -r -- "exec /usr/bin/env -i \"\${saved[@]}\" \"\${pane[@]}\" \"PWD=\$PWD\" ${(qqqq)real} \"\${args[@]}\""
+  )
+  (umask 077 && print -r -- $body >| $file) && chmod 700 $file
+}
+
+# An agent's hooks name the tab and process it started with, so after the pane moves to
+# another tab its status lands on the old one. Send its hooks through the shim, which
+# reads the pane's note and names the tab showing it now (see share/herdr-agent/hook-cmux)
+route_hooks() {
+  local agent=$1 var real
+  # Only claude can be moved, and each of the others fails for its own reason:
+  #   codex  its wrapper overwrites CMUX_CODEX_HOOK_CMUX_BIN, and the hook it injects
+  #          resolves cmux from CMUX_BUNDLED_CLI_PATH or $PATH, never from that variable
+  #   pi     its hooks carry --surface and --workspace from pi's own environment, which beat
+  #          anything we export, and it spawns them through an allowlist that drops HERDR_*
+  #   agy    its hooks name cmux directly in ~/.gemini/config/hooks.json
+  # Pointing any of them here would cost a process per hook and move nothing
+  case $agent in
+    (claude) var=CMUX_CLAUDE_HOOK_CMUX_BIN ;;
+    (*) return 0 ;;
+  esac
+  [[ ${(P)var:-} == "$hook_shim" ]] && return 0
+  real=${(P)var:-${CMUX_BUNDLED_CLI_PATH:-}}
+  [[ -x $real && -x $hook_shim ]] || return 0
+  export HERDR_AGENT_CMUX_BIN=$real
+  export $var=$hook_shim
+}
+
+# After a restart cmux replays the program that started an agent. Its own wrappers claim
+# claude and codex; nothing claims pi or agy, so their hooks record the real program and
+# cmux would restart it in the tab, beside the one still running in herdr. Claim the link
+# instead: cmux keeps a value it already finds set, and replaying the link comes back here.
+claim_launch() {
+  local agent=$1 kind
+  shift
+  case $agent in
+    (pi) kind=pi ;;
+    (agy) kind=antigravity ;;
+    (*) return 0 ;;
+  esac
+  # a record for another agent is the surrounding one's (an agent starting an agent)
+  [[ ${CMUX_AGENT_LAUNCH_KIND:-} == $kind && -n ${CMUX_AGENT_LAUNCH_ARGV_B64:-} ]] && return 0
+  export CMUX_AGENT_LAUNCH_KIND=$kind
+  export CMUX_AGENT_LAUNCH_EXECUTABLE=$links/$agent
+  export CMUX_AGENT_LAUNCH_ARGV_B64=$(print -rN -- $links/$agent "$@" | base64 | tr -d '\n')
+  export CMUX_AGENT_LAUNCH_CWD=$PWD
+}
+
+# Notes which herdr pane this cmux tab shows, under the tab's ID, which survives a cmux
+# restart, plus the pane's agent and session in case the pane is gone by then (a reboot)
+remember_tab() {
+  local session=$1 pane=$2 dir=$state_dir/tabs row
+  [[ ${CMUX_SURFACE_ID:-} == [[:xdigit:]-]## ]] || return 0
+  row=$(h $session pane list 2>/dev/null | jq -r --arg p $pane '
+    first(.result.panes[] | select(.pane_id == $p)) | [.agent // "", .agent_session.value // ""] | @tsv')
+  mkdir -p -m 700 -- $dir 2>/dev/null || return 0
+  print -r -- "$session"$'\t'"$pane"$'\t'"$row" >| $dir/$CMUX_SURFACE_ID
+  rm -f -- $dir/*(Nm+30)
+}
+
+# The other way round, for the hook shim: which tab shows this pane, and the process
+# that shows it — this one, once it becomes the attach client
+remember_pane() {
+  local session=$1 pane=$2 dir=$state_dir/panes
+  [[ ${CMUX_SURFACE_ID:-} == [[:xdigit:]-]## ]] || return 0
+  mkdir -p -m 700 -- $dir 2>/dev/null || return 0
+  print -r -- "$CMUX_SURFACE_ID"$'\t'"${CMUX_WORKSPACE_ID:-}"$'\t'"$$" >| $dir/$session.$pane
+  rm -f -- $dir/*(Nm+30)
+}
+
+# takeover: a resumed session may already be shown somewhere; this terminal wins.
+# herdr runs under the name $restart_id: cmux's restart entry matches a tab's process by
+# that name (argv[0]), and cmux accepts no environment variable but its own to match on
+attach() {
+  local session=$1 terminal=$2 pane=$3 takeover=${4:-}
+  remember_tab $session $pane
+  remember_pane $session $pane
+  if [[ -n ${HERDR_AGENT_ATTACH:-} ]]; then
+    exec ${(Q)${(z)HERDR_AGENT_ATTACH}} $session $terminal $pane
+  fi
+  forget_herdr_pane
+  exec -a $restart_id $herdr --session $session terminal attach $terminal ${takeover:+--takeover}
+}
+# not inside herdr by the time we attach, so any herdr pane variables here are stale
+forget_herdr_pane() {
+  unset HERDR_SOCKET_PATH HERDR_SESSION HERDR_AGENT_LAUNCH HERDR_ENV \
+    HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_BIN_PATH
+}
+
+# `herdr --remote <host> …` in a cmux tab (the herdr function in .zshrc sends it here): note
+# the arguments, so `attach --restore` can run them again after a cmux restart. herdr runs
+# under $restart_id with --remote first, which the -remote restart entry matches. Switched
+# off, inside herdr, or outside a cmux tab, it's plain herdr: there's no tab to bring back
+attach_remote() {
+  [[ ${1:-} == --remote && -n ${2:-} ]] ||
+    die "usage: herdr-agent attach --remote <ssh-target> [herdr options]"
+  if is_off || inside_herdr || [[ ${CMUX_SURFACE_ID:-} != [[:xdigit:]-]## ]]; then
+    exec $herdr "$@"
+  fi
+  remember_remote_tab "$@"
+  forget_herdr_pane
+  exec -a $restart_id $herdr "$@"
+}
+# the note is the arguments, tab-separated, so one with a tab or newline can't be noted
+remember_remote_tab() {
+  local dir=$state_dir/tabs
+  [[ "$*" != *[$'\t\n']* ]] || { warn "not noting this tab: an argument has a tab or newline"; return 0 }
+  mkdir -p -m 700 -- $dir 2>/dev/null || return 0
+  print -r -- ${(pj:\t:)@} >| $dir/$CMUX_SURFACE_ID
+  rm -f -- $dir/*(Nm+30)
+}
+
+launch() {
+  local agent=$1
+  shift
+  local -a args=("$@")
+  local real
+  real=$(find_real $agent) || die "can't find $agent on PATH"
+
+  here() {
+    [[ -n ${1:-} ]] && warn "$1; running $agent here instead"
+    exec $real "${args[@]}"
+  }
+
+  if is_off || inside_herdr || [[ ! -t 0 || ! -t 1 ]] || ! wants_herdr $agent "$@"; then
+    here
+  fi
+  [[ -x $herdr ]] || here "can't find herdr"
+  (( $+commands[jq] )) || here "needs jq"
+
+  # cmux finds a tab through the agent's process ID; nothing else sets agy's
+  [[ $agent == agy && -n ${CMUX_SURFACE_ID:-} ]] && export CMUX_ANTIGRAVITY_PID=$$
+  claim_launch $agent "$@"
+  route_hooks $agent
+
+  local rid found named
+  rid=$(resume_id $agent "$@")
+  if [[ -n $rid ]] && found=$(find_running $rid); then
+    attach ${=found} takeover
+  fi
+  # `claude --resume <text>` opens Claude's picker on that text; when the text names
+  # exactly one of this folder's conversations and it already runs, open that instead
+  if [[ $agent == claude && -n $rid && $rid != [[:xdigit:]](#c8)-[[:xdigit:]](#c4)-* ]] &&
+    named=$(claude_named_session $rid) && found=$(find_running $named); then
+    attach ${=found} takeover
+  fi
+
+  local root session label
+  root=$(checkout_root $PWD)
+  session=$(session_for $PWD)
+  label=${root:t}
+  [[ $root == "${HOME:A}" ]] && label='~'
+
+  # Launch files hold the whole environment, secrets included: a private folder only
+  local launch_dir=${TMPDIR:-/tmp}/herdr-agent lock=$state_dir/locks/$session.lock lockfd
+  mkdir -p -- ${lock:h} && : >>$lock && mkdir -p -m 700 -- $launch_dir &&
+    [[ -O $launch_dir && ! -L $launch_dir ]] && chmod 700 $launch_dir ||
+    here "can't use $lock or $launch_dir"
+  # one launch at a time per session, so two can't both start its server
+  zsystem flock -t 30 -f lockfd $lock || here "couldn't lock $lock"
+  server_running $session || start_server $session ||
+    here "herdr's $session server didn't start (log: $herdr_config/sessions/$session/herdr-agent-server.log)"
+
+  local file=$launch_dir/$session.$agent.$$.$RANDOM
+  if ! write_launch_file $file $real "$@"; then
+    rm -f -- $file
+    here "couldn't write $file"
+  fi
+
+  local ws created
+  ws=$(h $session workspace list 2>/dev/null |
+    jq -r --arg label $label 'first(.result.workspaces[] | select(.label == $label) | .workspace_id) // empty')
+  if [[ -n $ws ]]; then
+    created=$(h $session tab create --workspace $ws --cwd $PWD --label $agent \
+      --env HERDR_AGENT_LAUNCH=$file --no-focus 2>/dev/null)
+  else
+    created=$(h $session workspace create --cwd $PWD --label $label \
+      --env HERDR_AGENT_LAUNCH=$file --no-focus 2>/dev/null)
+  fi
+  zsystem flock -u $lockfd
+
+  local terminal pane
+  terminal=$(jq -r '.result.root_pane.terminal_id // empty' <<<$created 2>/dev/null)
+  pane=$(jq -r '.result.root_pane.pane_id // empty' <<<$created 2>/dev/null)
+  if [[ -z $terminal ]]; then
+    rm -f -- $file
+    here "herdr couldn't open a tab in $session"
+  fi
+
+  local tries=150
+  while [[ -e $file ]]; do
+    if (( --tries <= 0 )); then
+      rm -f -- $file
+      h $session pane close $pane >/dev/null 2>&1
+      here "the herdr tab didn't start $agent; is the herdr-agent hook at the top of ~/.zshenv?"
+    fi
+    nap 10
+  done
+  attach $session $terminal $pane
+}
+
+cmd_status() {
+  local agent real hook=missing mode
+  local -A found
+  if is_off; then print -r -- "herdr-agent is off"; else print -r -- "herdr-agent is on"; fi
+  print -r -- "  session here   $(session_for $PWD)"
+  print -r -- "  herdr          $herdr"
+  if (( $+commands[jq] )); then
+    print -r -- "  jq             ${commands[jq]}"
+  else
+    print -r -- "  jq             missing: brew install jq"
+  fi
+  for agent in claude codex pi agy; do
+    real=$(HERDR_AGENT_CHECK_AGENT= find_real $agent) && found[$agent]=1 || real='not found'
+    printf '  %-14s %s\n' $agent $real
+  done
+  grep -q HERDR_AGENT_LAUNCH -- $HOME/.zshenv 2>/dev/null && hook=installed
+  print -r -- "  .zshenv hook   $hook"
+  [[ ${CMUX_CUSTOM_CLAUDE_PATH:-} == "$links/claude" ]] &&
+    print -r -- "  cmux routes    claude and codex come here" ||
+    print -r -- "  cmux routes    not set in this shell (open a new tab after installing)"
+  # hooks from agents in herdr come from processes cmux didn't start
+  mode=$(defaults read ${CMUX_BUNDLE_ID:-com.cmuxterm.app.rbf} socketControlMode 2>/dev/null)
+  case $mode in
+    (automation|allowAll) print -r -- "  cmux socket    $mode" ;;
+    (*) print -r -- "  cmux socket    ${mode:-default}: pi's status won't show; set Automation mode (cmux Settings > Automation)" ;;
+  esac
+  if [[ -x $hook_shim ]]; then
+    print -r -- "  cmux hooks     routed through $hook_shim (claude only; codex, pi and agy stay on their first tab)"
+  else
+    print -r -- "  cmux hooks     missing $hook_shim: status stays on the tab an agent started in"
+  fi
+  if (( ${+found[pi]} )); then
+    if [[ -f ${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/cmux-session.ts ]]; then
+      print -r -- "  cmux pi hooks  installed"
+    else
+      print -r -- "  cmux pi hooks  missing: cmux hooks pi install"
+    fi
+  fi
+  if restart_entry_installed; then
+    print -r -- "  cmux restore   entries $restart_id and $restart_id-remote present (cmux asks to approve changes)"
+  else
+    print -r -- "  cmux restore   missing or outdated: herdr-agent install (attached and remote tabs won't come back after a cmux restart)"
+  fi
+  if (( ${+found[agy]} )); then
+    if grep -q 'hooks antigravity' -- $HOME/.gemini/config/hooks.json 2>/dev/null; then
+      print -r -- "  cmux agy hooks installed"
+    else
+      print -r -- "  cmux agy hooks missing: cmux hooks agy install"
+    fi
+  fi
+}
+
+# every agent in these herdr sessions as an aligned table: session, pane, agent, status,
+# and the tab name (the title the agent gives its terminal, which cmux shows on the tab)
+agent_table() {
+  local session
+  {
+    print -r -- $'SESSION\tPANE\tAGENT\tSTATUS\tTAB NAME'
+    for session in "$@"; do
+      h $session pane list 2>/dev/null | jq -r --arg s $session '
+        .result.panes[]
+        | select(.agent != null)
+        | [$s, .pane_id, .agent, (.agent_status // "-"),
+           ((.terminal_title_stripped // "") | if . == "" then "-" else . end)]
+        | @tsv'
+    done
+  } | column -t -s $'\t'
+}
+
+cmd_ps() {
+  local -a sessions
+  (( $+commands[jq] )) || die "ps needs jq"
+  sessions=(${(f)"$(running_sessions)"})
+  if [[ -n ${1:-} ]]; then
+    (( ${sessions[(Ie)$1]} )) || die "no running herdr session named $1 (see: herdr session list)"
+    sessions=($1)
+  fi
+  agent_table $sessions
+}
+
+# The command that starts agent $1's session $2 again, into resume_argv. claude and codex
+# go through the shell's own command (cmux's wrapper, in a cmux tab), pi and agy their links
+resume_argv_for() {
+  local agent=$1 id=$2
+  resume_argv=()
+  [[ -n $id ]] || return 1
+  case $agent in
+    (claude) resume_argv=(claude --resume $id) ;;
+    (codex) resume_argv=(codex resume $id) ;;
+    (pi) resume_argv=($links/pi --session $id) ;;
+    (agy) resume_argv=($links/agy --conversation $id) ;;
+    (*) return 1 ;;
+  esac
+}
+
+# After a cmux restart, cmux's restart command lands here: show the pane this tab showed
+# before, or, when that pane is gone (a reboot), start its agent's session again
+restore_tab() {
+  local note=$state_dir/tabs/${CMUX_SURFACE_ID:-} session pane agent id terminal
+  local -a sessions resume_argv remote
+  [[ -n ${CMUX_SURFACE_ID:-} && -f $note ]] ||
+    die "this tab has no saved herdr pane (see: herdr-agent ps, herdr-agent attach)"
+  # a remote herdr: run what the tab ran. An unreachable host prints ssh's reason and ends
+  # here, back at the tab's shell; cmux runs a restart command once, so nothing retries
+  IFS=$'\t' read -rA remote <$note
+  if [[ ${remote[1]:-} == --remote ]]; then
+    forget_herdr_pane
+    exec -a $restart_id $herdr $remote
+  fi
+  IFS=$'\t' read -r session pane agent id <$note
+  sessions=(${(f)"$(running_sessions)"})
+  if (( ${sessions[(Ie)$session]} )); then
+    terminal=$(h $session pane list 2>/dev/null |
+      jq -r --arg p $pane '.result.panes[] | select(.pane_id == $p) | .terminal_id')
+    [[ -n $terminal ]] && attach $session $terminal $pane takeover
+  fi
+  resume_argv_for "$agent" "$id" ||
+    die "herdr pane $pane in session $session is gone, and there's no agent session to start again"
+  warn "herdr pane $pane in session $session is gone; starting its $agent session again"
+  exec $resume_argv
+}
+
+# show a running pane in this terminal, taking it over from any other screen;
+# with no arguments, pick one of the running agents; --restore: see restore_tab
+cmd_attach() {
+  local session=${1:-} pane=${2:-} choice terminal
+  local -a sessions lines words
+  (( $+commands[jq] )) || die "attach needs jq"
+  inside_herdr && die "this terminal is already inside herdr; use herdr's own navigation"
+  [[ -t 0 && -t 1 ]] || die "attach needs an interactive terminal"
+  [[ $session == --restore ]] && restore_tab
+  sessions=(${(f)"$(running_sessions)"})
+  if [[ -z $session ]]; then
+    (( $+commands[fzf] )) ||
+      die "picking needs fzf; or name one: herdr-agent attach <session> <pane> (see: herdr-agent ps)"
+    (( $#sessions )) || die "no herdr session is running"
+    choice=$(agent_table $sessions | fzf --header-lines=1 --reverse --height=40% --prompt='attach to: ') ||
+      exit 1
+    # through an array: ${${(f)x}[1]} of a single line is its first character
+    lines=(${(f)choice})
+    words=(${(s: :)lines[1]})
+    session=${words[1]} pane=${words[2]}
+  elif [[ -z $pane ]]; then
+    die "usage: herdr-agent attach [<session> <pane>] (see: herdr-agent ps)"
+  fi
+  (( ${sessions[(Ie)$session]} )) || die "no running herdr session named $session (see: herdr session list)"
+  terminal=$(h $session pane list 2>/dev/null |
+    jq -r --arg p $pane '.result.panes[] | select(.pane_id == $p) | .terminal_id')
+  [[ -n $terminal ]] || die "no pane $pane in herdr session $session (see: herdr-agent ps $session)"
+  attach $session $terminal $pane takeover
+}
+
+# cmux's restart-command entries, one per line: tabs showing a herdr pane through this
+# launcher (`--session …`), and tabs showing a remote herdr (`--remote …`). Same process
+# name, told apart by the first argument, so no process matches both
+restart_entries() {
+  jq -cn --arg id $restart_id '
+    ({prefix: "--session", id: $id}, {prefix: "--remote", id: ($id + "-remote")})
+    | {id, match: {executable: $id, argumentTailPrefix: [.prefix]},
+       command: "herdr-agent attach --restore", cwd: "saved"}'
+}
+
+restart_entry_installed() {
+  [[ -f $cmux_restart_file ]] &&
+    jq -e --argjson e "$(restart_entries | jq -sc .)" \
+      '. as $f | $e | all(. as $x | any($f.definitions[]?; . == $x))' $cmux_restart_file >/dev/null 2>&1
+}
+
+# Adds (or refreshes) the entry. A file there replaces cmux's own list, so a new one
+# starts from the list the app ships. cmux then asks for the change to be approved.
+install_restart_entry() {
+  local file=$cmux_restart_file entry base
+  local -a shipped
+  if restart_entry_installed; then
+    print -r -- "cmux restart entries $restart_id and $restart_id-remote already in $file"
+    return 0
+  fi
+  entry=$(restart_entries | jq -sc .) || return 1
+  if [[ -f $file ]]; then
+    jq -e '.definitions | type == "array"' $file >/dev/null 2>&1 ||
+      { warn "$file isn't a restart-commands file cmux can read; add $restart_id by hand"; return 1 }
+    /bin/cp -p -- $file $file.bak-herdr-agent-$(date +%Y%m%d-%H%M%S) || return 1
+    base=$file
+  else
+    shipped=(/Applications/cmux*.app/Contents/Resources/CmuxRestartCommands_CmuxRestartCommands.bundle/Contents/Resources/default-restart-commands.json(N))
+    (( $#shipped )) || { warn "can't find cmux's own restart list to start $file from"; return 1 }
+    mkdir -p -- ${file:h} || return 1
+    base=${shipped[1]}
+  fi
+  jq --indent 2 --argjson e $entry \
+    '($e | map(.id)) as $ids
+     | .definitions = ([.definitions[]? | select(.id as $i | $ids | index($i) | not)] + $e)' \
+    $base >| $file.tmp &&
+    /bin/mv -f -- $file.tmp $file || { rm -f -- $file.tmp; return 1 }
+  print -r -- "added cmux restart entries $restart_id and $restart_id-remote to $file; approve them in cmux Settings"
+}
+
+cmd_install() {
+  local target=$HOME/.local/bin/herdr-agent
+  if [[ -e $target && ${target:A} != "$self" ]]; then
+    die "$target already exists and isn't this script; move it first"
+  fi
+  mkdir -p -- ${target:h} && ln -sfn -- $self $target || die "couldn't link $target"
+  print -r -- "linked $target -> $self"
+  install_restart_entry || die "couldn't add the cmux restart entry"
+}
+
+case $invoked in
+  (claude|codex|pi|agy) launch $invoked "$@" ;;
+esac
+
+case ${1:-status} in
+  (on)
+    rm -f -- $state_dir/off
+    cmd_status
+    ;;
+  (off)
+    mkdir -p -- $state_dir && : >| $state_dir/off
+    cmd_status
+    ;;
+  (status) cmd_status ;;
+  (session) session_for ${2:-$PWD} ;;
+  (ps) cmd_ps ${2:-} ;;
+  (attach)
+    [[ ${2:-} == --remote ]] && { shift; attach_remote "$@" }
+    cmd_attach ${2:-} ${3:-}
+    ;;
+  (install) cmd_install ;;
+  (check)
+    shift
+    exec ${self:h:h}/share/herdr-agent/check "$@"
+    ;;
+  (help|-h|--help) sed -n '2,/^$/s/^# \{0,1\}//p' $self ;;
+  (*) die "unknown command: $1 (try: herdr-agent help)" ;;
+esac
