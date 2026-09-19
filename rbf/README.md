@@ -36,7 +36,7 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 
 ## 🟠⋯ Copy Codex replies without their display wrapping
 - Drag across a Codex reply in herdr's full view and copy it to get the text Codex actually wrote: display-only wrap breaks and the reply gutter are removed, while Codex's own line breaks remain
-- This applies only to reply prose and code. Prompts, command output, diffs, tool rows, Claude Code, other agents, and attach tabs copy exactly as drawn
+- This applies only to reply prose and code. Prompts, command output, diffs, tool rows, Claude Code, and other agents copy exactly as drawn
 - Run `herdr pane get <pane>` on the machine running the server and check that it shows `agent_session` with `"agent": "codex"`. If it doesn't, run `herdr integration install codex` on that machine and start the Codex pane again
 - Herdr uses Codex's saved session reply as the authority. When it wanted that text and could not get it — no session hook, no session ID, an unreadable session file, or the lookup ran past its budget — it copies the rows as drawn and says `copied as shown · agent text unavailable`. It says the same when the rows match two saved replies differently, because joining would mean guessing
 - Rows that match no saved reply are an ordinary copy, not a failure: command output, diffs and tool rows in a Codex pane copy as drawn and say `copied to clipboard`
@@ -50,6 +50,12 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - Detaching doesn't bring back the tab's old name. Your shell's prompt renames it
 - Turn it off with `window_title = ""` under `[ui]` in `~/.config/herdr/config.toml`. That also stops herdr setting the full view's window title
 - Pane titles now survive an install (a live handoff), so `herdr pane list` keeps every name, and a tab that attaches again is named at once
+
+## 🟠⋯ Select and copy in attached agent tabs
+- Ordinary mouse drag in an attached agent tab (`herdr terminal attach`, cmux tabs launched via `herdr-agent`) visibly highlights and copies text, while the mouse wheel continues scrolling Herdr's retained scrollback buffer
+- Supported servers provide a one-pane semantic attach surface; older servers fall back to ANSI attachment with Shift-drag copy
+- When `ui.copy_on_select` is false, Ctrl+C (or Cmd+C if forwarded) copies the retained selection
+- If selected cells change during selection or the pane resizes, the selection clears with a notice: `selection changed · drag again`
 
 ## 🟠⋯ Agents that outlive the terminal (herdr-agent)
 - Type `claude`, `codex`, `pi` or `agy` in a cmux tab and the agent runs inside this checkout's herdr session, shown in that tab. Closing the tab, or quitting or restarting cmux, doesn't stop it

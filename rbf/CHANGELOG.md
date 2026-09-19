@@ -5,6 +5,16 @@ title: herdr-rbf RBF Changelog
 Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release history stays in the root `CHANGELOG.md`.
 
 # 🔵⋯ [Unreleased]
+(empty)
+
+---
+
+# 🔵⋯ v0.8.0 (2026-09-22)
+## 🟠⋯ Added for End Users
+- 2026-09-19 - feat (user need) | ordinary drag now highlights and copies in attached agent tabs while the wheel keeps scrolling Herdr's retained history (#hrdr-8.3)
+
+## 🟠⋯ Added for Technical Users
+- 2026-09-19 - feat (technical) | new advertised endpoint method `terminal.attach` gives compatible clients a full-size one-pane semantic surface; older servers keep the existing ANSI attachment (#hrdr-8.3)
 
 ---
 
