@@ -8,6 +8,12 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.9.1 (2026-09-23)
+## 🟠⋯ Fixed for End Users
+- 2026-09-23 - fix (user need) | attached agent tabs (`herdr terminal attach`, `herdr-agent attach`) stay connected again; on v0.9.0 they dropped within a second of attaching to a busy agent with `lost connection to server` (#hrdr-16)
+
+---
+
 # 🔵⋯ v0.9.0 (2026-09-23)
 ## 🟠⋯ 🚨 Breaking Changes for End Users
 - 2026-09-23 - refactor (user need) | ⌘K now clears through upstream Herdr's `clear_pane`, which ships unbound: add `clear_pane = "super+k"` under `[keys]` in `~/.config/herdr/config.toml` to get it back. The fork's own `keys.clear_screen` is gone (#hrdr-11)
