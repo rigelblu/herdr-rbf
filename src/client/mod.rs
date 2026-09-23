@@ -673,6 +673,7 @@ async fn run_client_loop(
             endpoint_methods,
             endpoint_capabilities,
             prefetched_messages,
+            surface_decoder: attach_surface_decoder,
             ..
         } = handshake;
         for message in prefetched_messages {
@@ -693,7 +694,8 @@ async fn run_client_loop(
             endpoint_methods.unwrap_or_default(),
             endpoint_capabilities.unwrap_or_default(),
         );
-        let surface_decoder = negotiated_surface_decoder(&negotiation);
+        let surface_decoder =
+            attach_surface_decoder.or_else(|| negotiated_surface_decoder(&negotiation));
         let transport = start_endpoint_transport(
             stream,
             (),
