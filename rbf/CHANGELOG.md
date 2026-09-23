@@ -5,6 +5,19 @@ title: herdr-rbf RBF Changelog
 Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release history stays in the root `CHANGELOG.md`.
 
 # 🔵⋯ [Unreleased]
+
+---
+
+# 🔵⋯ v0.9.0 (2026-09-23)
+## 🟠⋯ 🚨 Breaking Changes for End Users
+- 2026-09-23 - refactor (user need) | ⌘K now clears through upstream Herdr's `clear_pane`, which ships unbound: add `clear_pane = "super+k"` under `[keys]` in `~/.config/herdr/config.toml` to get it back. The fork's own `keys.clear_screen` is gone (#hrdr-11)
+
+## 🟠⋯ 🚨 Breaking Changes for Technical Users
+- 2026-09-23 - refactor (technical) | the socket method `pane.clear_screen` is gone; use upstream's `pane.clear` (#hrdr-11)
+
+## 🟠⋯ Improved for End Users
+- 2026-09-23 - feat (user need) | herdr-rbf now builds on upstream Herdr 0.9.1 (`23479dd1`), with every fork feature carried except the fork's own ⌘K above (#hrdr-11)
+
 ## 🟠⋯ Added for Technical Users
 - 2026-09-23 - feat (technical) | `rbf/scripts/upstream-sync.sh` replaces the old live-rebase upstream sync with a staged, resumable workflow (`check` → `stage` → `inspect` → `integrate` → resolve by hand → `finish`): the rebase happens as a detached jj operation you can inspect before anything moves, `master` follows it only at explicit `integrate`, every fork change is proven carried, empty, or deliberately dropped before `finish` records `verified-local-master`, and no phase ever pushes, installs, or releases. `rbf/scripts/verify-fork.sh` is the fork's own full check — `just ci`, `just docs-contract-test`, and this fork's harnesses — and the command to pass `finish` as `--verify-cmd` (#hrdr-11)
 
