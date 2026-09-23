@@ -8,6 +8,13 @@ use crate::protocol::{self, ClientMessage, ServerMessage};
 
 const REQUEST_ID: &str = "terminal-attach:startup";
 
+// Upstream's decoder has no `Debug`; `HandshakeResult` needs one to carry it.
+impl std::fmt::Debug for protocol::surface_reuse::Decoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Decoder").finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct AttachGeometry {
     pub(super) cols: u16,
@@ -31,7 +38,17 @@ pub(super) fn prepare_connection(
         .as_ref()
         .is_some_and(|methods| methods.iter().any(|method| method == "terminal.attach"));
     if supports_semantic_attach {
-        handshake.prefetched_messages = prepare(&mut stream, terminal_id, takeover)?;
+        let negotiation = super::endpoint::EndpointNegotiation::new(
+            handshake.endpoint_methods.clone().unwrap_or_default(),
+            handshake.endpoint_capabilities.clone().unwrap_or_default(),
+        );
+        let surface_reuse = negotiation.supports_capability(protocol::surface_reuse::CAPABILITY);
+        let surface_delta = negotiation.supports_capability(protocol::surface_delta::CAPABILITY);
+        let mut surface_decoder = (surface_reuse || surface_delta)
+            .then(|| protocol::surface_reuse::Decoder::new(surface_delta));
+        handshake.prefetched_messages =
+            prepare(&mut stream, terminal_id, takeover, &mut surface_decoder)?;
+        handshake.surface_decoder = surface_decoder;
         return Ok((stream, handshake, true));
     }
 
@@ -65,12 +82,14 @@ pub(super) fn prepare(
     stream: &mut LocalStream,
     terminal_id: String,
     takeover: bool,
+    surface_decoder: &mut Option<protocol::surface_reuse::Decoder>,
 ) -> io::Result<Vec<ServerMessage>> {
     prepare_with_timeout(
         stream,
         terminal_id,
         takeover,
         super::handshake::handshake_read_timeout(),
+        surface_decoder,
     )
 }
 
@@ -79,11 +98,18 @@ fn prepare_with_timeout(
     terminal_id: String,
     takeover: bool,
     timeout: std::time::Duration,
+    surface_decoder: &mut Option<protocol::surface_reuse::Decoder>,
 ) -> io::Result<Vec<ServerMessage>> {
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid attach timeout"))?;
-    let result = prepare_inner_until(stream, terminal_id, takeover, Some(deadline));
+    let result = prepare_inner_until(
+        stream,
+        terminal_id,
+        takeover,
+        Some(deadline),
+        surface_decoder,
+    );
     let clear_result = stream.set_recv_timeout(None);
     match (result, clear_result) {
         (Ok(messages), Ok(())) => Ok(messages),
@@ -96,8 +122,9 @@ fn prepare_inner(
     stream: &mut LocalStream,
     terminal_id: String,
     takeover: bool,
+    surface_decoder: &mut Option<protocol::surface_reuse::Decoder>,
 ) -> io::Result<Vec<ServerMessage>> {
-    prepare_inner_until(stream, terminal_id, takeover, None)
+    prepare_inner_until(stream, terminal_id, takeover, None, surface_decoder)
 }
 
 fn prepare_inner_until(
@@ -105,6 +132,7 @@ fn prepare_inner_until(
     terminal_id: String,
     takeover: bool,
     deadline: Option<std::time::Instant>,
+    surface_decoder: &mut Option<protocol::surface_reuse::Decoder>,
 ) -> io::Result<Vec<ServerMessage>> {
     let mut prefetched = Vec::new();
     let mut pending_projection = Vec::new();
@@ -126,6 +154,14 @@ fn prepare_inner_until(
         let message: ServerMessage =
             protocol::read_message(stream, protocol::MAX_GRAPHICS_FRAME_SIZE)
                 .map_err(|error| io::Error::other(error.to_string()))?;
+        // Decode in wire order, as the connection's reader would, so the decoder
+        // handed over to it already holds the baseline later deltas build on.
+        let message = match surface_decoder {
+            Some(decoder) => decoder
+                .decode(message)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            None => message,
+        };
         match &message {
             ServerMessage::EndpointControl { kind, data }
                 if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND =>
@@ -439,7 +475,7 @@ mod tests {
             }
         });
 
-        let messages = prepare_inner(&mut client, "term_1".into(), false)
+        let messages = prepare_inner(&mut client, "term_1".into(), false, &mut None)
             .expect("attached projection should become ready");
         fake_server.join().expect("fake server");
         let _ = std::fs::remove_file(path);
@@ -500,7 +536,7 @@ mod tests {
             }
         });
 
-        let messages = prepare_inner(&mut client, "term_1".into(), false)
+        let messages = prepare_inner(&mut client, "term_1".into(), false, &mut None)
             .expect("early exact projection should become ready");
         fake_server.join().expect("fake server");
         let _ = std::fs::remove_file(path);
@@ -553,7 +589,7 @@ mod tests {
             .expect("attach rejection");
         });
 
-        let error = prepare_inner(&mut client, "term_1".into(), false)
+        let error = prepare_inner(&mut client, "term_1".into(), false, &mut None)
             .expect_err("an advertised attach rejection must stop startup");
         fake_server.join().expect("fake server");
         let _ = std::fs::remove_file(path);
@@ -587,7 +623,7 @@ mod tests {
             }
         });
 
-        prepare_inner(&mut client, "term_1".into(), false)
+        prepare_inner(&mut client, "term_1".into(), false, &mut None)
             .expect_err("startup must not accept a mismatched projection before disconnect");
         fake_server.join().expect("fake server");
         let _ = std::fs::remove_file(path);
@@ -609,6 +645,7 @@ mod tests {
             "term_1".into(),
             false,
             std::time::Duration::from_millis(20),
+            &mut None,
         )
         .expect_err("silent semantic attach must time out");
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
@@ -638,11 +675,83 @@ mod tests {
             "term_1".into(),
             false,
             std::time::Duration::from_millis(20),
+            &mut None,
         )
         .expect_err("continuous stale traffic must not extend semantic startup");
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         release_tx.send(()).expect("release fake server");
         fake_server.join().expect("fake server");
         let _ = std::fs::remove_file(path);
+    }
+
+    fn one_cell_surface(surface_revision: u64, symbol: &str) -> protocol::PaneSurfaceFrame {
+        let mut frame = protocol::FrameData::from_ratatui_buffer(
+            &ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 120, 40)),
+            None,
+        );
+        frame.cells[0].symbol = symbol.into();
+        protocol::PaneSurfaceFrame {
+            boot_id: "boot".into(),
+            projection_revision: 7,
+            surface_revision,
+            frame,
+            panes: Vec::new(),
+            splits: Vec::new(),
+            popup: None,
+            graphics: protocol::SurfaceGraphicsScene::default(),
+        }
+    }
+
+    // herdr-rbf `hrdr-16`: startup reads the first full frame before the connection's
+    // reader exists, so the decoder it hands over must already hold that frame, or the
+    // first surface delta fails with "surface delta without a baseline".
+    #[test]
+    fn startup_hands_the_connection_a_decoder_that_holds_the_first_frame() {
+        let (mut client, mut server, path) = local_stream_pair();
+        let first = one_cell_surface(1, "a");
+        let first_for_server = first.clone();
+        let fake_server = std::thread::spawn(move || {
+            protocol::write_message(&mut server, &snapshot(1)).expect("initial snapshot");
+            read_attach_request(&mut server);
+            let response = schema::SuccessResponse {
+                id: REQUEST_ID.into(),
+                result: schema::ResponseResult::TerminalAttached {
+                    pane_id: "pane".into(),
+                    projection_revision: 7,
+                },
+            };
+            for message in [
+                ServerMessage::ClientShellEndpointResponseChunk {
+                    boot_id: "boot".into(),
+                    request_id: REQUEST_ID.into(),
+                    final_chunk: true,
+                    data: serde_json::to_vec(&response).expect("serialize response"),
+                },
+                snapshot(7),
+                ServerMessage::PaneSurface(first_for_server),
+            ] {
+                protocol::write_message(&mut server, &message).expect("startup message");
+            }
+        });
+
+        let mut decoder = Some(protocol::surface_reuse::Decoder::new(true));
+        prepare_inner(&mut client, "term_1".into(), false, &mut decoder)
+            .expect("attached projection should become ready");
+        fake_server.join().expect("fake server");
+        let _ = std::fs::remove_file(path);
+
+        let mut next = ServerMessage::PaneSurface(one_cell_surface(2, "b"));
+        let delta = protocol::surface_delta::message(&first, &mut next)
+            .expect("encode surface delta")
+            .expect("a one-cell change travels as a delta");
+        let decoded = decoder
+            .as_mut()
+            .expect("decoder")
+            .decode(delta)
+            .expect("the handed-over decoder holds the first frame");
+        assert!(matches!(
+            decoded,
+            ServerMessage::PaneSurface(surface) if surface.frame.cells[0].symbol == "b"
+        ));
     }
 }
