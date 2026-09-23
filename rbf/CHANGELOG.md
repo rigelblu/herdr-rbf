@@ -5,7 +5,8 @@ title: herdr-rbf RBF Changelog
 Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release history stays in the root `CHANGELOG.md`.
 
 # 🔵⋯ [Unreleased]
-(empty)
+## 🟠⋯ Added for Technical Users
+- 2026-09-23 - feat (technical) | `rbf/scripts/upstream-sync.sh` replaces the old live-rebase upstream sync with a staged, resumable workflow (`check` → `stage` → `inspect` → `integrate` → resolve by hand → `finish`): the rebase happens as a detached jj operation you can inspect before anything moves, `master` follows it only at explicit `integrate`, every fork change is proven carried, empty, or deliberately dropped before `finish` records `verified-local-master`, and no phase ever pushes, installs, or releases. `rbf/scripts/verify-fork.sh` is the fork's own full check — `just ci`, `just docs-contract-test`, and this fork's harnesses — and the command to pass `finish` as `--verify-cmd` (#hrdr-11)
 
 ---
 
