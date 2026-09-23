@@ -572,6 +572,7 @@ async fn run_client_loop(
             endpoint_methods,
             endpoint_capabilities,
             prefetched_messages,
+            surface_decoder: attach_surface_decoder,
             ..
         } = handshake;
         for message in prefetched_messages {
@@ -594,8 +595,10 @@ async fn run_client_loop(
         );
         let surface_reuse = negotiation.supports_capability(protocol::surface_reuse::CAPABILITY);
         let surface_delta = negotiation.supports_capability(protocol::surface_delta::CAPABILITY);
-        let surface_decoder = (surface_reuse || surface_delta)
-            .then(|| protocol::surface_reuse::Decoder::new(surface_delta));
+        let surface_decoder = attach_surface_decoder.or_else(|| {
+            (surface_reuse || surface_delta)
+                .then(|| protocol::surface_reuse::Decoder::new(surface_delta))
+        });
         let transport = start_endpoint_transport(
             stream,
             (),

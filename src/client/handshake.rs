@@ -123,6 +123,9 @@ pub(super) struct HandshakeResult {
     pub(super) endpoint_methods: Option<Vec<String>>,
     pub(super) endpoint_capabilities: Option<Vec<String>>,
     pub(super) prefetched_messages: Vec<ServerMessage>,
+    /// Set by semantic attach, which decodes its startup messages before the
+    /// connection's reader starts; that reader continues from this baseline.
+    pub(super) surface_decoder: Option<crate::protocol::surface_reuse::Decoder>,
 }
 
 pub(crate) fn probe_endpoint_negotiation(
@@ -273,6 +276,7 @@ pub(super) fn do_handshake(
             endpoint_methods: Some(welcome.methods),
             endpoint_capabilities: Some(welcome.capabilities),
             prefetched_messages: Vec::new(),
+            surface_decoder: None,
         });
     }
 
@@ -291,6 +295,7 @@ pub(super) fn do_handshake(
                 endpoint_methods: None,
                 endpoint_capabilities: None,
                 prefetched_messages: Vec::new(),
+                surface_decoder: None,
             })
         }
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(

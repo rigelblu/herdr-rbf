@@ -400,6 +400,87 @@ fn direct_attach_initial_mouse_capture_follows_config() {
     cleanup_spawned_herdr(attach, base);
 }
 
+// herdr-rbf `hrdr-16`: the rendered attach reads its startup messages before the
+// connection's reader starts. Attaching to a busy pane, the server's next frames are
+// surface deltas on the first frame startup read; the client must keep drawing them,
+// not end the attach with "surface delta without a baseline".
+#[test]
+fn semantic_attach_keeps_drawing_after_the_first_frame() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned_server = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        "onboarding = false\n",
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+    let created = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "create-workspace-for-semantic-attach",
+            "method": "workspace.create",
+            "params": {"cwd": base},
+        })
+        .to_string(),
+    );
+    let terminal_id = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .expect("created terminal id")
+        .to_string();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("created pane id")
+        .to_string();
+
+    // Keep the pane printing, so frames keep flowing while the attach starts.
+    send_pane_shell_command(
+        &api_socket,
+        &pane_id,
+        "for i in $(seq 1 3000); do echo tick$i; sleep 0.005; done",
+    );
+    thread::sleep(Duration::from_millis(200));
+    let mut attach = spawn_client_process_with_args(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &["terminal", "attach", &terminal_id],
+    );
+    let output = spawn_pty_drain(
+        attach
+            ._master
+            .as_ref()
+            .expect("attach master")
+            .try_clone_reader()
+            .expect("clone attach PTY reader"),
+    );
+    // Each pass: the client is still connected, and it drew something new.
+    for _ in 0..4 {
+        let seen = output_len(&output);
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            attach.child.try_wait().unwrap().is_none(),
+            "attach client must survive the frames that follow startup; output: {:?}",
+            read_output(&output)
+        );
+        assert!(
+            output_len(&output) > seen,
+            "attach client must keep drawing the busy pane; output: {:?}",
+            read_output(&output)
+        );
+    }
+
+    drop(spawned_server);
+    cleanup_spawned_herdr(attach, base);
+}
+
 #[test]
 fn client_sees_headless_startup_config_diagnostic() {
     let _lock = test_lock();
