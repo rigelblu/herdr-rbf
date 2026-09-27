@@ -57,6 +57,18 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - After a cmux restart, a tab that showed an agent, or ran `herdr --remote <host>`, shows it again. claude's status and notifications follow the tab showing it
 - It installs with the fork (below) into `~/.local`, so it runs from the copy and not the checkout. It needs two blocks in `~/.zshenv` and one in `~/.zshrc`, given in `rbf/src/herdr-agent/share/herdr-agent/README.md`
 - `herdr-agent status` says what's wired and what isn't; `herdr-agent off` and `on` are the switch
+- **Default session routing and reused servers**: By default, `herdr-agent` routes agent launches to the session for the current folder/repo root, reusing any server already running for that session. An install, live handoff, or launcher update does not alter the process context of an already running server. A server that outlives a macOS logout/login loses its macOS service context unless it was started by this launcher with the paired binary. If an existing server suffers from degraded or broken macOS service context (for example, failing default Keychain search list access or agent TLS/bootstrap errors), newly launched agents continue to inherit that existing server's context until the server is stopped and restarted.
+- **Temporary routing to a healthy session**: While an existing session is in use or draining, you can route new agent launches to a separate, verified healthy named session using the environment override:
+  ```bash
+  HERDR_AGENT_SESSION=<healthy-session-name> <agent>
+  ```
+  Or export `HERDR_AGENT_SESSION=<healthy-session-name>` in the shell. This starts or attaches to that named session without modifying other running sessions.
+- **Drain-first session migration**: To migrate an affected named session to a fresh server with verified persistent user service context:
+  1. **Drain and save work first**: Finish active tasks and save editor files in all open panes.
+  2. **Stop the server**: Run `herdr --session <session-name> server stop`. Stopping the server ends all active pane processes in that session.
+  3. **Restart the session**: Launch an agent into that session from a healthy outer shell (for example, `HERDR_AGENT_SESSION=<session-name> <agent>`). The updated launcher verifies binary capability and starts a fresh server with the strict user context request. Stopping the server ends its pane processes; restart restores the workspace and tab layout with fresh shell processes.
+  4. Never delete the session with `herdr session delete` during migration, or saved layout will be lost.
+- **Paired install requirement**: Strict macOS context adoption requires both the capability-bearing Herdr binary (`herdr --capability macos-strict-user-context`) and the matching `herdr-agent` launcher. Run `rbf/scripts/install-rbf.sh` to install both together. Do not use `rbf/scripts/install-rbf.sh --herdr-agent` alone when updating for this fix: an older Herdr binary will fail the capability check, and the launcher will refuse to start new servers until `install-rbf.sh` installs the matching binary.
 
 # 🔵⋯ Install
 ## 🟠⋯ Install your fork build as your daily `herdr`
@@ -66,7 +78,7 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - Every attached `herdr` window closes during its session's handoff. Reattach with `herdr` for `default`, or `herdr session attach <name>`. The install prints each command, and panes redraw when a window reattaches
 - `rbf/scripts/install-rbf.sh --rollback` swaps `herdr.previous` back in and hands off the same way. Run it again to undo the rollback. It never touches herdr-agent
 - The same run installs herdr-agent from `rbf/src/herdr-agent`, after `herdr` and before any handoff: the launcher at `~/.local/bin/herdr-agent`, the rest behind the link `~/.local/share/herdr-agent`. The copy it replaces is kept as `herdr-agent.previous`
-- `rbf/scripts/install-rbf.sh --herdr-agent` installs herdr-agent alone, with no build and no handoff. `--herdr-agent --rollback` puts the previous herdr-agent back and leaves `herdr` and every session alone; run it again to return to the newer copy
+- `rbf/scripts/install-rbf.sh --herdr-agent` installs herdr-agent alone, with no build and no handoff. `--herdr-agent --rollback` puts the previous herdr-agent back and leaves `herdr` and every session alone; run it again to return to the newer copy (note: on macOS, fresh server starts require a paired capability-bearing `herdr` binary from a full `install-rbf.sh` run; the launcher will refuse to start servers if paired with an older binary)
 - Exit codes: `0` installed, and every step after it finished; `1` nothing installed (with `--herdr-agent`, herdr-agent unchanged); `2` usage error; `3` installed, but a later step didn't finish: a session handoff, herdr-agent after `herdr`, cmux's restart entries, or keeping herdr-agent's rollback target
 - Each run logs to `~/Library/Logs/herdr-rbf-install.log`
 - Needs the Rust toolchain from `rust-toolchain.toml`, Zig 0.16.0, `python3`, and `~/.local/bin` on `PATH` ahead of any other `herdr`. herdr-agent's restart entries need `jq`
