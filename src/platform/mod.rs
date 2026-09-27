@@ -166,6 +166,10 @@ pub(crate) const fn capabilities() -> PlatformCapabilities {
     }
 }
 
+pub(crate) fn supports_cli_capability(name: &str) -> bool {
+    cfg!(target_os = "macos") && name == "macos-strict-user-context"
+}
+
 pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
     #[cfg(unix)]
     let (cols, rows) = unix_common::read_terminal_grid_size()?;
@@ -188,9 +192,21 @@ pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std:
     command.spawn().map(|child| child.id())
 }
 
+// Only macOS adopts a service context; other targets always report `Inherited`,
+// but the shared server bootstrap still matches every outcome without cfg gates.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessContextOutcome {
+    Inherited,
+    Adopted,
+    BestEffortWarning(String),
+}
+
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn prepare_server_process(_handoff_import: bool) -> std::io::Result<bool> {
-    Ok(false)
+pub(crate) fn prepare_server_process(
+    _handoff_import: bool,
+) -> std::io::Result<ProcessContextOutcome> {
+    Ok(ProcessContextOutcome::Inherited)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -712,6 +728,16 @@ mod tests {
             read_limited_reader(input, 16).expect("limited read"),
             LimitedRead::Complete(b"image".to_vec())
         );
+    }
+
+    #[test]
+    fn cli_capability_checks_match_platform_support() {
+        assert_eq!(
+            supports_cli_capability("macos-strict-user-context"),
+            cfg!(target_os = "macos")
+        );
+        assert!(!supports_cli_capability("nonexistent-capability"));
+        assert!(!supports_cli_capability(""));
     }
 }
 

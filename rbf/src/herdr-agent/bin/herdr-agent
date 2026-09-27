@@ -132,6 +132,7 @@ herdr_cli() {
   /usr/bin/perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' ${HERDR_AGENT_TIMEOUT:-15} \
     /usr/bin/env -u HERDR_SOCKET_PATH -u HERDR_SESSION -u HERDR_ENV -u HERDR_PANE_ID \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_BIN_PATH -u HERDR_AGENT_LAUNCH \
+    -u HERDR_MACOS_SERVER_CONTEXT \
     $herdr "$@"
 }
 
@@ -374,6 +375,18 @@ start_server() {
       __CF_USER_TEXT_ENCODING XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME; do
     [[ -n ${(P)var:-} ]] && envs+=("$var=${(P)var}")
   done
+  if [[ $OSTYPE == darwin* ]]; then
+    local cap_out
+    local -i cap_status=0
+    cap_out=$(herdr_cli --capability macos-strict-user-context 2>&1) || cap_status=$?
+    # A mismatched pair is a broken install: stop, rather than run the agent outside
+    # herdr where nothing says it isn't persistent
+    if (( cap_status != 0 )) || [[ $cap_out != "macos-strict-user-context" ]]; then
+      die "herdr at $herdr can't start a server that survives logout (status $cap_status: ${cap_out//$'\n'/ })." \
+        "Reinstall the pair with rbf/scripts/install-rbf.sh, or run without herdr: HERDR_AGENT=off $agent"
+    fi
+    envs+=(HERDR_MACOS_SERVER_CONTEXT=strict)
+  fi
   mkdir -p -- $dir || return 1
   # Its own process session, so closing the terminal that started it can't hang it up
   /usr/bin/env -i "${envs[@]}" /usr/bin/perl -MPOSIX -e \
@@ -392,7 +405,7 @@ write_launch_file() {
   shift 2
   local -a saved
   saved=(${(0)"$(/usr/bin/env -0)"})
-  saved=(${saved:#(HERDR_(ENV|PANE_ID|TAB_ID|WORKSPACE_ID|SOCKET_PATH|SESSION|BIN_PATH|AGENT_LAUNCH)|TERM|COLORTERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|GHOSTTY_*|PWD|OLDPWD|SHLVL|_)=*})
+  saved=(${saved:#(HERDR_(ENV|PANE_ID|TAB_ID|WORKSPACE_ID|SOCKET_PATH|SESSION|BIN_PATH|AGENT_LAUNCH|MACOS_SERVER_CONTEXT)|TERM|COLORTERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|GHOSTTY_*|PWD|OLDPWD|SHLVL|_)=*})
   local body
   body=$(
     print -r -- '#!/bin/zsh -f'
@@ -401,6 +414,7 @@ write_launch_file() {
     print -r -- "saved=(${(j: :)${(@qqqq)saved}})"
     print -r -- "args=(${(j: :)${(@qqqq)@}})"
     print -r -- 'pane=(${(M)${(f)"$(/usr/bin/env)"}:#(HERDR_*|TERM|COLORTERM)=*})'
+    print -r -- 'pane=(${pane:#HERDR_MACOS_SERVER_CONTEXT=*})'
     print -r -- "exec /usr/bin/env -i \"\${saved[@]}\" \"\${pane[@]}\" \"PWD=\$PWD\" ${(qqqq)real} \"\${args[@]}\""
   )
   (umask 077 && print -r -- $body >| $file) && chmod 700 $file
@@ -487,7 +501,8 @@ attach() {
 # not inside herdr by the time we attach, so any herdr pane variables here are stale
 forget_herdr_pane() {
   unset HERDR_SOCKET_PATH HERDR_SESSION HERDR_AGENT_LAUNCH HERDR_ENV \
-    HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_BIN_PATH
+    HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_BIN_PATH \
+    HERDR_MACOS_SERVER_CONTEXT
 }
 
 # `herdr --remote <host> …` in a cmux tab (the herdr function in .zshrc sends it here): note

@@ -20,6 +20,7 @@ pub(super) fn command() -> Command {
                 .help("Choose local or server keybindings for remote attach"),
         )
         .arg(flag("handoff").help("Opt into live handoff for update or remote attach"))
+        .arg(option("capability", "NAME").help("Query binary capability and exit"))
         .arg(flag("default-config").help("Print default configuration and exit"))
         .arg(flag("skill").help("Print the agent skill file and exit"))
         .arg(

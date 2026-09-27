@@ -78,6 +78,7 @@ pub(crate) fn parse_env_assignment(raw: &str) -> Result<(String, String), String
     Ok((key.to_string(), value.to_string()))
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum CommandOutcome {
     Handled(i32),
     NotCli,
@@ -92,6 +93,44 @@ pub(super) fn print_read_response(response: &serde_json::Value) -> std::io::Resu
         print!("{text}");
     }
     Ok(0)
+}
+
+pub(crate) fn maybe_run_capability(args: &[String]) -> Option<std::io::Result<CommandOutcome>> {
+    if !matches!(args.get(1).map(String::as_str), Some("--capability"))
+        && !args
+            .get(1)
+            .is_some_and(|arg| arg.starts_with("--capability="))
+    {
+        return None;
+    }
+
+    let capability_name =
+        if args.len() == 3 && args.get(1).map(String::as_str) == Some("--capability") {
+            Some(args[2].as_str())
+        } else if args.len() == 2 {
+            args.get(1)
+                .and_then(|arg| arg.strip_prefix("--capability="))
+        } else {
+            None
+        };
+
+    let Some(name) = capability_name else {
+        eprintln!("error: invalid capability query invocation: herdr --capability <name>");
+        return Some(Ok(CommandOutcome::Handled(2)));
+    };
+
+    if name.is_empty() {
+        eprintln!("error: --capability requires a non-empty capability name");
+        return Some(Ok(CommandOutcome::Handled(2)));
+    }
+
+    if crate::platform::supports_cli_capability(name) {
+        println!("{name}");
+        Some(Ok(CommandOutcome::Handled(0)))
+    } else {
+        eprintln!("error: unsupported capability: {name}");
+        Some(Ok(CommandOutcome::Handled(1)))
+    }
 }
 
 pub(crate) fn maybe_run_machine(args: &[String]) -> Option<std::io::Result<CommandOutcome>> {
@@ -1182,5 +1221,72 @@ mod tests {
                 "5000",
             ]
         );
+    }
+
+    #[test]
+    fn capability_queries_handle_supported_and_unsupported_inputs() {
+        let res = super::maybe_run_capability(&[
+            "herdr".to_string(),
+            "--capability".to_string(),
+            "macos-strict-user-context".to_string(),
+        ]);
+        match res {
+            Some(Ok(super::CommandOutcome::Handled(code))) => {
+                if cfg!(target_os = "macos") {
+                    assert_eq!(code, 0);
+                } else {
+                    assert_eq!(code, 1);
+                }
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let res = super::maybe_run_capability(&[
+            "herdr".to_string(),
+            "--capability=macos-strict-user-context".to_string(),
+        ]);
+        match res {
+            Some(Ok(super::CommandOutcome::Handled(code))) => {
+                if cfg!(target_os = "macos") {
+                    assert_eq!(code, 0);
+                } else {
+                    assert_eq!(code, 1);
+                }
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let res = super::maybe_run_capability(&[
+            "herdr".to_string(),
+            "--capability".to_string(),
+            "unknown".to_string(),
+        ]);
+        assert!(matches!(res, Some(Ok(super::CommandOutcome::Handled(1)))));
+
+        let res = super::maybe_run_capability(&["herdr".to_string(), "--capability".to_string()]);
+        assert!(matches!(res, Some(Ok(super::CommandOutcome::Handled(2)))));
+
+        let res = super::maybe_run_capability(&["herdr".to_string(), "--capability=".to_string()]);
+        assert!(matches!(res, Some(Ok(super::CommandOutcome::Handled(2)))));
+
+        let res = super::maybe_run_capability(&[
+            "herdr".to_string(),
+            "--capability".to_string(),
+            "macos-strict-user-context".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(matches!(res, Some(Ok(super::CommandOutcome::Handled(2)))));
+
+        let res = super::maybe_run_capability(&["herdr".to_string(), "status".to_string()]);
+        assert!(res.is_none());
+
+        let res = super::maybe_run_capability(&[
+            "herdr".to_string(),
+            "pane".to_string(),
+            "send-text".to_string(),
+            "pane-1".to_string(),
+            "--capability".to_string(),
+        ]);
+        assert!(res.is_none());
     }
 }
