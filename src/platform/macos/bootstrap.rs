@@ -4,9 +4,33 @@ use std::process::Command;
 
 use libc::{c_char, c_int, c_void, mach_port_t, uid_t};
 
+use super::super::ProcessContextOutcome;
+
 const SERVER_CONTEXT_ENV: &str = "HERDR_MACOS_SERVER_CONTEXT";
 const USER_CONTEXT: &str = "user";
+const STRICT_USER_CONTEXT: &str = "strict";
 const TASK_BOOTSTRAP_PORT: c_int = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerContextMode {
+    None,
+    BestEffort,
+    Strict,
+}
+
+pub(crate) fn parse_context_mode(
+    requested: Option<&OsStr>,
+    handoff_import: bool,
+) -> ServerContextMode {
+    if handoff_import {
+        return ServerContextMode::None;
+    }
+    match requested.and_then(|s| s.to_str()) {
+        Some(USER_CONTEXT) => ServerContextMode::BestEffort,
+        Some(STRICT_USER_CONTEXT) => ServerContextMode::Strict,
+        _ => ServerContextMode::None,
+    }
+}
 
 type GetRoot = unsafe extern "C" fn(mach_port_t, *mut mach_port_t) -> c_int;
 type LookupUser =
@@ -31,22 +55,38 @@ pub(crate) fn configure_server_daemon_context(command: &mut Command) {
 }
 
 /// Called after exec, before logging, worker threads, or pane creation.
-pub(crate) fn prepare_server_process(handoff_import: bool) -> io::Result<bool> {
+pub(crate) fn prepare_server_process(handoff_import: bool) -> io::Result<ProcessContextOutcome> {
     let requested = std::env::var_os(SERVER_CONTEXT_ENV);
     // This is a one-shot launch request, not environment for panes or plugins.
     std::env::remove_var(SERVER_CONTEXT_ENV);
-    if !needs_user_context(requested.as_deref(), handoff_import) {
-        return Ok(false);
+    let mode = parse_context_mode(requested.as_deref(), handoff_import);
+    match mode {
+        ServerContextMode::None => Ok(ProcessContextOutcome::Inherited),
+        ServerContextMode::BestEffort => {
+            let api = match BootstrapApi::load() {
+                Ok(api) => api,
+                Err(err) => return Ok(ProcessContextOutcome::BestEffortWarning(err.to_string())),
+            };
+            if let Err(err) = api.adopt_user_context() {
+                return Ok(ProcessContextOutcome::BestEffortWarning(err.to_string()));
+            }
+            Ok(ProcessContextOutcome::Adopted)
+        }
+        ServerContextMode::Strict => {
+            let api = BootstrapApi::load().map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("strict macOS user service context adoption failed: {err}"),
+                )
+            })?;
+            api.adopt_user_context().map_err(|err| {
+                io::Error::other(format!(
+                    "strict macOS user service context adoption failed: {err}"
+                ))
+            })?;
+            Ok(ProcessContextOutcome::Adopted)
+        }
     }
-    let api = BootstrapApi::load()?;
-    api.adopt_user_context()?;
-    Ok(true)
-}
-
-fn needs_user_context(requested: Option<&OsStr>, handoff_import: bool) -> bool {
-    // A replacement must preserve its source's policy, not silently rehome a
-    // direct server. Fixed sources already pass on the durable context by fork.
-    !handoff_import && requested == Some(OsStr::new(USER_CONTEXT))
 }
 
 struct BootstrapApi {
@@ -77,6 +117,13 @@ impl BootstrapApi {
     }
 
     fn adopt_user_context(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if let Ok(err_str) = std::env::var("HERDR_TEST_MACOS_BOOTSTRAP_FAIL") {
+            let code = err_str.parse::<c_int>().unwrap_or(141);
+            return Err(io::Error::other(format!(
+                "bootstrap_get_root failed (Mach error {code})"
+            )));
+        }
         let inherited = unsafe { *self.bootstrap };
         let mut root = SendRight::new(self);
         check("bootstrap_get_root", unsafe {
@@ -110,6 +157,16 @@ impl BootstrapApi {
 }
 
 fn symbol(name: &CStr) -> io::Result<*mut c_void> {
+    #[cfg(test)]
+    if std::env::var_os("HERDR_TEST_MACOS_BOOTSTRAP_UNAVAILABLE").is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "macOS service-context API unavailable: {}",
+                name.to_string_lossy()
+            ),
+        ));
+    }
     let address = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
     if address.is_null() {
         Err(io::Error::new(
@@ -167,6 +224,9 @@ impl Drop for SendRight<'_> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::sync::Mutex;
+
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Default)]
     struct Calls {
@@ -231,6 +291,7 @@ mod tests {
 
     #[test]
     fn adoption_transfers_user_right_and_releases_old_and_root_rights() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         CALLS.with(|calls| *calls.borrow_mut() = Calls::default());
         let mut bootstrap = 10;
         fake_api(&mut bootstrap).adopt_user_context().unwrap();
@@ -244,6 +305,7 @@ mod tests {
 
     #[test]
     fn failed_adoption_keeps_inherited_context_and_releases_temporary_rights() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         for (failure, released) in [
             ("root", vec![]),
             ("lookup", vec![20]),
@@ -274,12 +336,117 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_handoff_servers_keep_inherited_context() {
-        assert!(!needs_user_context(None, false));
-        assert!(!needs_user_context(Some(OsStr::new("unknown")), false));
-        assert!(needs_user_context(Some(OsStr::new(USER_CONTEXT)), false));
-        assert!(!needs_user_context(None, true));
-        assert!(!needs_user_context(Some(OsStr::new(USER_CONTEXT)), true));
+    fn context_mode_parsing_distinguishes_best_effort_and_strict() {
+        assert_eq!(parse_context_mode(None, false), ServerContextMode::None);
+        assert_eq!(
+            parse_context_mode(Some(OsStr::new("unknown")), false),
+            ServerContextMode::None
+        );
+        assert_eq!(
+            parse_context_mode(Some(OsStr::new(USER_CONTEXT)), false),
+            ServerContextMode::BestEffort
+        );
+        assert_eq!(
+            parse_context_mode(Some(OsStr::new(STRICT_USER_CONTEXT)), false),
+            ServerContextMode::Strict
+        );
+
+        // Handoff always ignores requested context
+        assert_eq!(parse_context_mode(None, true), ServerContextMode::None);
+        assert_eq!(
+            parse_context_mode(Some(OsStr::new(USER_CONTEXT)), true),
+            ServerContextMode::None
+        );
+        assert_eq!(
+            parse_context_mode(Some(OsStr::new(STRICT_USER_CONTEXT)), true),
+            ServerContextMode::None
+        );
+    }
+
+    #[test]
+    fn prepare_server_process_consumes_marker_and_fails_on_strict_error() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var(SERVER_CONTEXT_ENV, STRICT_USER_CONTEXT);
+        std::env::set_var("HERDR_TEST_MACOS_BOOTSTRAP_FAIL", "141");
+        let result = prepare_server_process(false);
+        std::env::remove_var("HERDR_TEST_MACOS_BOOTSTRAP_FAIL");
+        assert!(std::env::var_os(SERVER_CONTEXT_ENV).is_none());
+        let err = result.expect_err("strict adoption failure must return Err");
+        assert!(
+            err.to_string().contains("Mach error 141"),
+            "expected Mach error 141 in {err}"
+        );
+    }
+
+    #[test]
+    fn prepare_server_process_warns_and_continues_on_best_effort_error() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var(SERVER_CONTEXT_ENV, USER_CONTEXT);
+        std::env::set_var("HERDR_TEST_MACOS_BOOTSTRAP_FAIL", "141");
+        let result = prepare_server_process(false);
+        std::env::remove_var("HERDR_TEST_MACOS_BOOTSTRAP_FAIL");
+        assert!(std::env::var_os(SERVER_CONTEXT_ENV).is_none());
+        match result.expect("best-effort failure must not return Err") {
+            ProcessContextOutcome::BestEffortWarning(msg) => {
+                assert!(
+                    msg.contains("Mach error 141"),
+                    "expected Mach error 141 in {msg}"
+                );
+            }
+            other => panic!("expected BestEffortWarning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_server_process_on_handoff_ignores_marker_and_removes_it() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var(SERVER_CONTEXT_ENV, STRICT_USER_CONTEXT);
+        let result = prepare_server_process(true);
+        assert!(std::env::var_os(SERVER_CONTEXT_ENV).is_none());
+        assert_eq!(result.unwrap(), ProcessContextOutcome::Inherited);
+    }
+
+    #[test]
+    fn prepare_server_process_without_marker_inherits() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SERVER_CONTEXT_ENV);
+        let result = prepare_server_process(false);
+        assert_eq!(result.unwrap(), ProcessContextOutcome::Inherited);
+    }
+
+    #[test]
+    fn prepare_server_process_fails_on_symbol_unavailability_when_strict() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var(SERVER_CONTEXT_ENV, STRICT_USER_CONTEXT);
+        std::env::set_var("HERDR_TEST_MACOS_BOOTSTRAP_UNAVAILABLE", "1");
+        let result = prepare_server_process(false);
+        std::env::remove_var("HERDR_TEST_MACOS_BOOTSTRAP_UNAVAILABLE");
+        assert!(std::env::var_os(SERVER_CONTEXT_ENV).is_none());
+        let err = result.expect_err("strict adoption failure must return Err on symbol absence");
+        assert!(
+            err.to_string()
+                .contains("macOS service-context API unavailable"),
+            "expected API unavailable in {err}"
+        );
+    }
+
+    #[test]
+    fn prepare_server_process_warns_on_symbol_unavailability_when_best_effort() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var(SERVER_CONTEXT_ENV, USER_CONTEXT);
+        std::env::set_var("HERDR_TEST_MACOS_BOOTSTRAP_UNAVAILABLE", "1");
+        let result = prepare_server_process(false);
+        std::env::remove_var("HERDR_TEST_MACOS_BOOTSTRAP_UNAVAILABLE");
+        assert!(std::env::var_os(SERVER_CONTEXT_ENV).is_none());
+        match result.expect("best-effort failure must not return Err on symbol absence") {
+            ProcessContextOutcome::BestEffortWarning(msg) => {
+                assert!(
+                    msg.contains("macOS service-context API unavailable"),
+                    "expected API unavailable in {msg}"
+                );
+            }
+            other => panic!("expected BestEffortWarning, got {other:?}"),
+        }
     }
 
     #[test]

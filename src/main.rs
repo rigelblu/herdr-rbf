@@ -530,6 +530,9 @@ fn main() -> io::Result<()> {
     if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
         return result;
     }
+    if let Some(outcome) = cli::maybe_run_capability(&raw_args) {
+        return finish_cli(outcome);
+    }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
     }
@@ -717,6 +720,7 @@ fn main() -> io::Result<()> {
         println!("  --remote-keybindings <local|server>");
         println!("                      Keybindings for --remote app attach (default: local)");
         println!("  --handoff           Opt into live handoff for update or remote attach");
+        println!("  --capability <name> Query binary capability and exit");
         println!("  --default-config    Print default configuration and exit");
         println!("  --skill             Print the agent skill file and exit");
         println!("  --version, -V       Print version and exit");
@@ -755,6 +759,7 @@ fn main() -> io::Result<()> {
         "--machine",
         "--remote",
         "--remote-keybindings",
+        "--capability",
         "--version",
         "-V",
         "--default-config",

@@ -34,7 +34,8 @@ failures=0
 # The check plays a plain terminal, even when it runs inside herdr, or from an agent the
 # launcher started (which carries the real cmux its hook shim calls)
 unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH \
-  HERDR_SESSION HERDR_BIN_PATH HERDR_AGENT_LAUNCH HERDR_AGENT_CMUX_BIN
+  HERDR_SESSION HERDR_BIN_PATH HERDR_AGENT_LAUNCH HERDR_AGENT_CMUX_BIN \
+  HERDR_MACOS_SERVER_CONTEXT
 
 pass() { print -r -- "  ok    $*" }
 fail() { print -r -- "  FAIL  $*"; (( failures++ )) }
@@ -444,6 +445,11 @@ if (( ! ${+got[HERDR_AGENT_LAUNCH]} )); then
   pass "HERDR_AGENT_LAUNCH didn't leak into the agent"
 else
   fail "HERDR_AGENT_LAUNCH leaked into the agent"
+fi
+if (( ! ${+got[HERDR_MACOS_SERVER_CONTEXT]} )); then
+  pass "HERDR_MACOS_SERVER_CONTEXT didn't leak into the agent"
+else
+  fail "HERDR_MACOS_SERVER_CONTEXT leaked into the agent"
 fi
 # cmux replays this program after a restart: it has to be the link, not the real pi,
 # or the restart runs pi in the tab beside the one still running in herdr

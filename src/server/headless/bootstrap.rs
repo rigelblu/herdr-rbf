@@ -1,4 +1,5 @@
 use super::*;
+use tracing::error;
 
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
@@ -12,10 +13,18 @@ pub fn run_server() -> io::Result<()> {
         warn!("{warning}");
     }
     match process_context {
-        Ok(true) => info!("server using persistent user service context"),
-        Ok(false) => {}
+        Ok(crate::platform::ProcessContextOutcome::Adopted) => {
+            info!("server using persistent user service context");
+        }
+        Ok(crate::platform::ProcessContextOutcome::Inherited) => {}
+        Ok(crate::platform::ProcessContextOutcome::BestEffortWarning(err)) => {
+            warn!(%err, "could not select persistent user service context; retaining inherited context");
+        }
         Err(err) => {
-            warn!(%err, "could not select persistent user service context; retaining inherited context")
+            error!(%err, "strict persistent user service context adoption failed; aborting server");
+            eprintln!("error: {err}");
+            crate::logging::shutdown("server");
+            return Err(err);
         }
     }
     crate::platform::raise_server_nofile_limit();
