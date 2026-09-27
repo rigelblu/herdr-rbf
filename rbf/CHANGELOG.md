@@ -5,6 +5,10 @@ title: herdr-rbf RBF Changelog
 Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release history stays in the root `CHANGELOG.md`.
 
 # 🔵⋯ [Unreleased]
+
+---
+
+# 🔵⋯ v0.9.2 (2026-09-27)
 ## 🟠⋯ Fixed for End Users
 - 2026-09-27 - fix (user need) | Codex and agy keep starting in a herdr-agent session after I log out of macOS and back in. A session whose server started before this update keeps the old behavior until its work is saved and the server is stopped and restarted (#hrdr-17)
 
