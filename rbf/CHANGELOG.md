@@ -8,6 +8,12 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.9.3 (2026-09-28)
+## 🟠⋯ Fixed for End Users
+- 2026-09-28 - fix (user need) | When an agent I start quits right away, the tab says which agent quit, its exit status, and its last lines of output, instead of "server shut down: terminal … exited". A normal quit prints one status line. Sessions pick it up at install, no restart needed (#hrdr-18)
+
+---
+
 # 🔵⋯ v0.9.2 (2026-09-27)
 ## 🟠⋯ Fixed for End Users
 - 2026-09-27 - fix (user need) | Codex and agy keep starting in a herdr-agent session after I log out of macOS and back in. A session whose server started before this update keeps the old behavior until its work is saved and the server is stopped and restarted (#hrdr-17)
