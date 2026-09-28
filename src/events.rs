@@ -80,6 +80,7 @@ pub enum AppEvent {
     PaneDied {
         pane_id: PaneId,
         exit_reason: crate::platform::ChildExitReason,
+        exit_status: Option<u32>,
     },
     /// A worktree-removal runtime could not be restored normally.
     WorktreeRuntimeRestoreFailed { pane_id: PaneId, operation_id: u64 },

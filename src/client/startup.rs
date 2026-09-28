@@ -7,11 +7,23 @@ pub fn run_client() -> io::Result<()> {
 
 #[cfg(unix)]
 pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()> {
-    run_client_with_mode(
+    let result = run_client_with_mode(
         Some((terminal_id, takeover)),
         Some(AttachEscapeState::default()),
         "attaching to terminal",
-    )
+    );
+    // A refused or ended attach prints like a shutdown after connect, not as a debug dump;
+    // any other error keeps its usual path
+    if let Err(err) = &result {
+        if let Some(attach_err) = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<TerminalAttachError>())
+        {
+            eprintln!("herdr: {attach_err}");
+            std::process::exit(1);
+        }
+    }
+    result
 }
 
 #[cfg(windows)]
