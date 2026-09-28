@@ -69,13 +69,16 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     );
 
     app.state.default_shell = crate::app::exiting_test_command().into();
+    static TEST_SERVER_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = TEST_SERVER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "hh-{}-{}",
+        "hh-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        counter
     ));
     let _ = fs::create_dir_all(&dir);
     let socket_path = dir.join("client.sock");
@@ -116,6 +119,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         server_config_diagnostic: None,
         server_config_diagnostic_without_keybindings: None,
         terminal_attach_owners: HashMap::new(),
+        terminal_exit_messages: HashMap::new(),
         pending_alt_screen_reads: Vec::new(),
         deferred_alt_screen_reads: Vec::new(),
         next_activity_stamp: 1,
@@ -5191,6 +5195,7 @@ async fn host_shutdown_preserves_panes_from_queued_and_selected_death_events() {
     let event = || AppEvent::PaneDied {
         pane_id,
         exit_reason: crate::platform::ChildExitReason::Exited,
+        exit_status: None,
     };
     server.app.event_tx.try_send(event()).unwrap();
     server
@@ -5248,7 +5253,8 @@ async fn pane_death_reconciles_each_client_view_and_focus() {
     assert!(
         server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
             pane_id: dead_pane,
-            exit_reason: crate::platform::ChildExitReason::Exited
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         })
     );
 
@@ -5317,7 +5323,8 @@ async fn pane_death_reapplies_controller_geometry() {
     assert!(
         server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
             pane_id: dead_pane,
-            exit_reason: crate::platform::ChildExitReason::Exited
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         })
     );
 
@@ -5566,6 +5573,350 @@ fn terminal_attach_client_exits_when_worktree_remove_succeeds() {
     assert_eq!(reason, Some(format!("terminal {terminal_id} exited")));
 }
 
+#[tokio::test]
+async fn terminal_attach_receives_status_and_screen_lines_on_failure() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("attached");
+    let pane_id = workspace.tabs[0].root_pane;
+    workspace.tabs[0].custom_name = Some("agent-worker".into());
+    let screen_content = b"first line\r\n\r\nline 1\r\nline 2\r\nline 3\r\nline 4\r\nline 5\r\nline 6\r\nline 7\r\nline 8\r\nline 9\r\nline 10\r\nline 11\r\n\r\n";
+    workspace.insert_test_runtime(
+        pane_id,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen_content),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    let terminal_id = server.app.state.workspaces[0]
+        .pane_state(pane_id)
+        .expect("pane")
+        .attached_terminal_id
+        .clone();
+    let terminal_id_string = terminal_id.to_string();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+
+    assert!(!server.handle_server_event(ServerEvent::ClientConnected {
+        client_id: 7,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+        writer,
+    }));
+    assert!(
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 7,
+            terminal_id: terminal_id_string.clone(),
+            takeover: false,
+        })
+    );
+
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: Some(1),
+        })
+    );
+
+    let reason =
+        read_server_shutdown_reason(control_rx.recv().expect("shutdown message")).expect("reason");
+    assert!(reason.starts_with("agent-worker exited with status 1"));
+    assert!(!reason.contains("first line"));
+    assert!(!reason.contains("line 1\n"));
+    assert!(reason.contains("  line 2\n"));
+    assert!(reason.contains("  line 11"));
+
+    // Late attach within 30s gets the exact same message
+    let (writer8, control_rx8, _) = test_client_writer();
+    assert!(!server.handle_server_event(ServerEvent::ClientConnected {
+        client_id: 8,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+        writer: writer8,
+    }));
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 8,
+            terminal_id: terminal_id_string.clone(),
+            takeover: false,
+        })
+    );
+    let reason8 =
+        read_server_shutdown_reason(control_rx8.recv().expect("shutdown message")).expect("reason");
+    assert_eq!(reason8, reason);
+
+    // Simulate entry expiration (> 30s)
+    if let Some(entry) = server.terminal_exit_messages.get_mut(&terminal_id_string) {
+        entry.0 = std::time::Instant::now() - std::time::Duration::from_secs(31);
+    }
+    let (writer9, control_rx9, _) = test_client_writer();
+    assert!(!server.handle_server_event(ServerEvent::ClientConnected {
+        client_id: 9,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+        writer: writer9,
+    }));
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 9,
+            terminal_id: terminal_id_string.clone(),
+            takeover: false,
+        })
+    );
+    let reason9 =
+        read_server_shutdown_reason(control_rx9.recv().expect("shutdown message")).expect("reason");
+    assert_eq!(
+        reason9,
+        format!("terminal attach failed: terminal {terminal_id_string} not found")
+    );
+}
+
+#[tokio::test]
+async fn terminal_attach_receives_status_only_on_success() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("attached");
+    let pane_id = workspace.tabs[0].root_pane;
+    workspace.tabs[0].custom_name = Some("agent-worker".into());
+    let screen_content = b"line 1\r\nline 2\r\n";
+    workspace.insert_test_runtime(
+        pane_id,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen_content),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    let terminal_id = server.app.state.workspaces[0]
+        .pane_state(pane_id)
+        .expect("pane")
+        .attached_terminal_id
+        .clone();
+    let terminal_id_string = terminal_id.to_string();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+
+    assert!(!server.handle_server_event(ServerEvent::ClientConnected {
+        client_id: 7,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+        writer,
+    }));
+    assert!(
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 7,
+            terminal_id: terminal_id_string.clone(),
+            takeover: false,
+        })
+    );
+
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: Some(0),
+        })
+    );
+
+    let reason =
+        read_server_shutdown_reason(control_rx.recv().expect("shutdown message")).expect("reason");
+    assert_eq!(reason, "agent-worker exited with status 0");
+}
+
+#[tokio::test]
+async fn terminal_attach_receives_name_exited_when_status_unknown() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("attached");
+    let pane_id = workspace.tabs[0].root_pane;
+    workspace.tabs[0].custom_name = Some("pi".into());
+    let screen_content = b"line 1\r\nline 2\r\n";
+    workspace.insert_test_runtime(
+        pane_id,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen_content),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    let terminal_id = server.app.state.workspaces[0]
+        .pane_state(pane_id)
+        .expect("pane")
+        .attached_terminal_id
+        .clone();
+    let terminal_id_string = terminal_id.to_string();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+
+    assert!(!server.handle_server_event(ServerEvent::ClientConnected {
+        client_id: 7,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+        writer,
+    }));
+    assert!(
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 7,
+            terminal_id: terminal_id_string.clone(),
+            takeover: false,
+        })
+    );
+
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
+        })
+    );
+
+    let reason =
+        read_server_shutdown_reason(control_rx.recv().expect("shutdown message")).expect("reason");
+    assert_eq!(reason, "pi exited");
+}
+
+#[tokio::test]
+async fn terminal_attach_name_precedence_tab_label_agent_terminal_id() {
+    // 1. Tab label set -> uses tab label
+    {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("ws1");
+        let pane_id = workspace.tabs[0].root_pane;
+        workspace.tabs[0].custom_name = Some("my-label".into());
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+            );
+        let (writer, control_rx, _) = test_client_writer();
+        server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            writer,
+        });
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 1,
+            terminal_id: terminal_id.to_string(),
+            takeover: false,
+        });
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: Some(0),
+        });
+        let reason = read_server_shutdown_reason(control_rx.recv().unwrap()).unwrap();
+        assert_eq!(reason, "my-label exited with status 0");
+    }
+
+    // 2. Tab label unset, detected agent set -> uses agent name
+    {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("ws2");
+        let pane_id = workspace.tabs[0].root_pane;
+        workspace.tabs[0].custom_name = None;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+            );
+        let (writer, control_rx, _) = test_client_writer();
+        server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            writer,
+        });
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 2,
+            terminal_id: terminal_id.to_string(),
+            takeover: false,
+        });
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: Some(0),
+        });
+        let reason = read_server_shutdown_reason(control_rx.recv().unwrap()).unwrap();
+        assert_eq!(reason, "pi exited with status 0");
+    }
+
+    // 3. Tab label unset, detected agent unset -> uses terminal <id>
+    {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("ws3");
+        let pane_id = workspace.tabs[0].root_pane;
+        workspace.tabs[0].custom_name = None;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let (writer, control_rx, _) = test_client_writer();
+        server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 3,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            writer,
+        });
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 3,
+            terminal_id: terminal_id.to_string(),
+            takeover: false,
+        });
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: Some(0),
+        });
+        let reason = read_server_shutdown_reason(control_rx.recv().unwrap()).unwrap();
+        assert_eq!(
+            reason,
+            format!("terminal {terminal_id} exited with status 0")
+        );
+    }
+}
+
 #[test]
 fn expected_worktree_runtime_exit_does_not_release_agent() {
     let mut server = test_headless_server();
@@ -5592,7 +5943,8 @@ fn expected_worktree_runtime_exit_does_not_release_agent() {
     assert!(
         server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
             pane_id,
-            exit_reason: crate::platform::ChildExitReason::Exited
+            exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         })
     );
 

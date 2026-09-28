@@ -174,6 +174,8 @@ const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 /// otherwise idle. Keep this much slower than the old resize-poll cadence to
 /// avoid reintroducing the idle CPU spin.
 const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long a dead terminal's exit message waits for an attach that arrives late.
+const TERMINAL_EXIT_MESSAGE_RETENTION: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Headless server
@@ -232,6 +234,8 @@ pub struct HeadlessServer {
     server_config_diagnostic_without_keybindings: Option<String>,
     /// Writable direct attach owner per terminal id string.
     terminal_attach_owners: HashMap<String, u64>,
+    /// Retained exit messages for recently terminated terminals (retained for 30s).
+    pub(crate) terminal_exit_messages: HashMap<String, (Instant, String)>,
     /// Deferred application-history reads currently driving alternate-screen viewports.
     pending_alt_screen_reads: Vec<crate::server::alt_screen_read::PendingAltScreenRead>,
     /// Reads waiting for an alternate-screen traversal of the same terminal to finish.
@@ -370,6 +374,7 @@ impl HeadlessServer {
             server_config_diagnostic,
             server_config_diagnostic_without_keybindings,
             terminal_attach_owners: HashMap::new(),
+            terminal_exit_messages: HashMap::new(),
             pending_alt_screen_reads: Vec::new(),
             deferred_alt_screen_reads: Vec::new(),
             next_activity_stamp: 1,
@@ -1884,6 +1889,27 @@ impl HeadlessServer {
         true
     }
 
+    /// Keeps a dead terminal's exit message for a late attach, dropping expired ones so a
+    /// long-lived server doesn't accumulate one per pane it ever closed.
+    pub(crate) fn record_terminal_exit_message(&mut self, terminal_id: &str, message: String) {
+        self.prune_terminal_exit_messages();
+        self.terminal_exit_messages
+            .insert(terminal_id.to_string(), (Instant::now(), message));
+    }
+
+    fn prune_terminal_exit_messages(&mut self) {
+        self.terminal_exit_messages
+            .retain(|_, (recorded_at, _)| recorded_at.elapsed() <= TERMINAL_EXIT_MESSAGE_RETENTION);
+    }
+
+    pub(crate) fn terminal_not_found_message(&mut self, terminal_id: &str) -> String {
+        self.prune_terminal_exit_messages();
+        if let Some((_, message)) = self.terminal_exit_messages.get(terminal_id) {
+            return message.clone();
+        }
+        format!("terminal attach failed: terminal {terminal_id} not found")
+    }
+
     fn claim_terminal_attachment(
         &mut self,
         client_id: u64,
@@ -1891,9 +1917,7 @@ impl HeadlessServer {
         takeover: bool,
     ) -> Result<crate::terminal::TerminalId, String> {
         let Some(real_terminal_id) = self.terminal_id_by_string(terminal_id) else {
-            return Err(format!(
-                "terminal attach failed: terminal {terminal_id} not found"
-            ));
+            return Err(self.terminal_not_found_message(terminal_id));
         };
         if self
             .pending_alt_screen_reads

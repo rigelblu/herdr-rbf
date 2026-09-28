@@ -482,6 +482,172 @@ fn semantic_attach_keeps_drawing_after_the_first_frame() {
 }
 
 #[test]
+fn terminal_attach_prints_exit_status_and_screen_lines_after_attach() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned_server = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        "onboarding = false\n",
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let created = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "create-ws-slow-exit",
+            "method": "workspace.create",
+            "params": {"cwd": base},
+        })
+        .to_string(),
+    );
+    let terminal_id = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .expect("created terminal id")
+        .to_string();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("created pane id")
+        .to_string();
+
+    let mut attach = spawn_client_process_with_args(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &["terminal", "attach", &terminal_id],
+    );
+    let output = spawn_pty_drain(
+        attach
+            ._master
+            .as_ref()
+            .expect("attach master")
+            .try_clone_reader()
+            .expect("clone attach PTY reader"),
+    );
+
+    thread::sleep(Duration::from_millis(500));
+    send_pane_shell_command(&api_socket, &pane_id, "sleep 1; echo boom; exit 3");
+
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+            let out = read_output(&output);
+            out.contains("exited with status 3") && out.contains("boom")
+        }),
+        "client should receive exit message; output: {:?}",
+        read_output(&output)
+    );
+    assert!(
+        read_output(&output).contains("herdr: server shut down: "),
+        "an exit after connect arrives as a shutdown"
+    );
+
+    let status = attach.child.wait().expect("wait for attach client");
+    assert!(!status.success());
+    assert_eq!(status.exit_code(), 1);
+
+    drop(spawned_server);
+    cleanup_spawned_herdr(attach, base);
+}
+
+#[test]
+fn terminal_attach_prints_exit_status_and_screen_lines_before_attach() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned_server = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        "onboarding = false\n",
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let created = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "create-ws-instant-exit",
+            "method": "workspace.create",
+            "params": {"cwd": base},
+        })
+        .to_string(),
+    );
+    let terminal_id = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .expect("created terminal id")
+        .to_string();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("created pane id")
+        .to_string();
+
+    send_pane_shell_command(&api_socket, &pane_id, "echo boom; exit 3");
+
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(50), || {
+            let request = format!(
+                r#"{{"id":"check_pane","method":"pane.get","params":{{"pane_id":"{pane_id}"}}}}"#
+            );
+            let resp = send_json_request(&api_socket, &request);
+            resp["error"].is_object()
+        }),
+        "pane should exit and be removed from server"
+    );
+
+    let mut attach = spawn_client_process_with_args(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &["terminal", "attach", &terminal_id],
+    );
+    let output = spawn_pty_drain(
+        attach
+            ._master
+            .as_ref()
+            .expect("attach master")
+            .try_clone_reader()
+            .expect("clone attach PTY reader"),
+    );
+
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+            let out = read_output(&output);
+            out.contains("exited with status 3") && out.contains("boom")
+        }),
+        "client should receive exit message without Custom error; output: {:?}",
+        read_output(&output)
+    );
+
+    let out = read_output(&output);
+    assert!(!out.contains("Custom {"));
+    assert!(out.contains("herdr: "));
+    assert!(
+        !out.contains("server shut down"),
+        "an exit before connect is an error reply, not a shutdown"
+    );
+
+    let status = attach.child.wait().expect("wait for attach client");
+    assert!(!status.success());
+    assert_eq!(status.exit_code(), 1);
+
+    drop(spawned_server);
+    cleanup_spawned_herdr(attach, base);
+}
+
+#[test]
 fn client_sees_headless_startup_config_diagnostic() {
     let _lock = test_lock();
     let base = unique_test_dir();

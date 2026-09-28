@@ -594,6 +594,11 @@ launch() {
   else
     created=$(h $session workspace create --cwd $PWD --label $label \
       --env HERDR_AGENT_LAUNCH=$file --no-focus 2>/dev/null)
+    local root_tab
+    root_tab=$(jq -r '.result.tab.tab_id // empty' <<<$created 2>/dev/null)
+    if [[ -n $root_tab ]]; then
+      h $session tab rename $root_tab $agent >/dev/null 2>&1
+    fi
   fi
   zsystem flock -u $lockfd
 

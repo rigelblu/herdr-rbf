@@ -213,7 +213,9 @@ fn prepare_inner_until(
                     if let Ok(error) =
                         serde_json::from_slice::<schema::ErrorResponse>(&response_bytes)
                     {
-                        return Err(io::Error::other(error.error.message));
+                        return Err(io::Error::other(
+                            crate::client::TerminalAttachError::ErrorReply(error.error.message),
+                        ));
                     }
                     let response =
                         serde_json::from_slice::<schema::SuccessResponse>(&response_bytes)
@@ -260,7 +262,7 @@ fn prepare_inner_until(
             ServerMessage::WindowTitle { .. } if attached_revision.is_none() => {}
             ServerMessage::ServerShutdown { reason } => {
                 return Err(io::Error::other(
-                    reason.clone().unwrap_or_else(|| "server shut down".into()),
+                    crate::client::TerminalAttachError::ServerShutdown(reason.clone()),
                 ));
             }
             _ => prefetched.push(message),

@@ -176,16 +176,14 @@ impl HeadlessServer {
             return false;
         }
         let Some(terminal_id) = self.resolve_terminal_target_id_string(&params.terminal_id) else {
+            let error_msg = self.terminal_not_found_message(&params.terminal_id);
             self.send_to_client(
                 client_id,
                 crate::server::client_commands::error_message(
                     boot_id,
                     request_id,
                     "terminal_not_found",
-                    format!(
-                        "terminal attach failed: terminal {} not found",
-                        params.terminal_id
-                    ),
+                    error_msg,
                 ),
             );
             return false;
@@ -193,26 +191,28 @@ impl HeadlessServer {
         let target = match self.app.resolve_terminal_target(&terminal_id) {
             Ok(target) => target,
             Err(_) => {
+                let error_msg = self.terminal_not_found_message(&terminal_id);
                 self.send_to_client(
                     client_id,
                     crate::server::client_commands::error_message(
                         boot_id,
                         request_id,
                         "terminal_not_found",
-                        format!("terminal attach failed: terminal {terminal_id} not found"),
+                        error_msg,
                     ),
                 );
                 return false;
             }
         };
         let Some(pane_id) = self.app.public_pane_id(target.ws_idx, target.pane_id) else {
+            let error_msg = self.terminal_not_found_message(&terminal_id);
             self.send_to_client(
                 client_id,
                 crate::server::client_commands::error_message(
                     boot_id,
                     request_id,
                     "terminal_not_found",
-                    format!("terminal attach failed: terminal {terminal_id} not found"),
+                    error_msg,
                 ),
             );
             return false;

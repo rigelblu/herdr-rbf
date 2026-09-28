@@ -651,13 +651,91 @@ impl HeadlessServer {
                 let focus_before = self.shell_focus_targets();
                 let focused_tabs_before = self.focused_shell_tabs();
                 let pane_id_val = *pane_id;
-                let terminal_id = self.app.state.workspaces.iter().find_map(|ws| {
-                    ws.tabs.iter().find_map(|tab| {
-                        tab.panes
-                            .get(pane_id)
-                            .map(|pane| pane.attached_terminal_id.to_string())
-                    })
-                });
+                let exit_status_val = match &ev {
+                    AppEvent::PaneDied { exit_status, .. } => *exit_status,
+                    _ => None,
+                };
+                let pane_context =
+                    self.app
+                        .state
+                        .workspaces
+                        .iter()
+                        .enumerate()
+                        .find_map(|(ws_idx, ws)| {
+                            ws.tabs.iter().find_map(|tab| {
+                                tab.panes.get(pane_id).map(|pane| {
+                                    let tab_label = tab
+                                        .custom_name
+                                        .as_ref()
+                                        .map(|s| s.trim())
+                                        .filter(|s| !s.is_empty())
+                                        .map(|s| s.to_string());
+                                    let agent = self
+                                        .app
+                                        .state
+                                        .terminals
+                                        .get(&pane.attached_terminal_id)
+                                        .and_then(|t| {
+                                            t.effective_known_agent().or(t.detected_agent)
+                                        });
+                                    let terminal_id = pane.attached_terminal_id.to_string();
+                                    (ws_idx, tab_label, agent, terminal_id)
+                                })
+                            })
+                        });
+                let terminal_id = pane_context.as_ref().map(|(_, _, _, tid)| tid.clone());
+                let is_worktree_or_handoff =
+                    matches!(ev, AppEvent::WorktreeRuntimeRestoreFailed { .. })
+                        || matches!(
+                            &ev,
+                            AppEvent::PaneDied { exit_reason, .. } if exit_reason.is_handoff()
+                        )
+                        || self
+                            .app
+                            .pending_worktree_remove_runtime_exits
+                            .contains_key(&pane_id_val);
+
+                let exit_message = if is_worktree_or_handoff {
+                    let tid = terminal_id.as_deref().unwrap_or("unknown");
+                    format!("terminal {tid} exited")
+                } else if let Some((ws_idx, tab_label, agent, ref tid)) = pane_context {
+                    let name = tab_label
+                        .or_else(|| agent.map(crate::detect::agent_label).map(str::to_string))
+                        .unwrap_or_else(|| format!("terminal {tid}"));
+                    match exit_status_val {
+                        Some(0) => format!("{name} exited with status 0"),
+                        Some(code) => {
+                            let mut msg = format!("{name} exited with status {code}");
+                            if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                                &self.app.terminal_runtimes,
+                                ws_idx,
+                                pane_id_val,
+                            ) {
+                                let snapshot = runtime.recent_unwrapped_text_snapshot(50);
+                                let non_blank_lines: Vec<&str> = snapshot
+                                    .text
+                                    .lines()
+                                    .map(str::trim_end)
+                                    .filter(|line| !line.trim().is_empty())
+                                    .collect();
+                                let take_count = non_blank_lines.len().min(10);
+                                let last_lines =
+                                    &non_blank_lines[non_blank_lines.len() - take_count..];
+                                for line in last_lines {
+                                    msg.push('\n');
+                                    msg.push_str("  ");
+                                    msg.push_str(line);
+                                }
+                            }
+                            msg
+                        }
+                        None => format!("{name} exited"),
+                    }
+                } else {
+                    let tid = terminal_id.as_deref().unwrap_or("unknown");
+                    format!("terminal {tid} exited")
+                };
+
                 if matches!(&ev, AppEvent::PaneDied { .. })
                     && !self
                         .app
@@ -686,10 +764,8 @@ impl HeadlessServer {
 
                 if self.app.find_pane(pane_id_val).is_none() {
                     if let Some(terminal_id) = terminal_id {
-                        self.shutdown_terminal_stream_clients(
-                            &terminal_id,
-                            format!("terminal {terminal_id} exited"),
-                        );
+                        self.record_terminal_exit_message(&terminal_id, exit_message.clone());
+                        self.shutdown_terminal_stream_clients(&terminal_id, exit_message);
                     }
                 }
 
