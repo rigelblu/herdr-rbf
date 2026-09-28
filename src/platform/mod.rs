@@ -70,6 +70,16 @@ pub enum ChildExitReason {
 }
 
 impl ChildExitReason {
+    /// A pane taken over by a live install: the replacement server has no wait handle,
+    /// so it never learns the exit status.
+    pub(crate) fn is_handoff(self) -> bool {
+        match self {
+            #[cfg(unix)]
+            Self::Handoff => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn requires_session_checkpoint(self) -> bool {
         match self {
             Self::Interrupted => true,

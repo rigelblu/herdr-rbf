@@ -104,6 +104,7 @@ impl App {
                 AppEvent::PaneDied {
                     pane_id,
                     exit_reason: crate::platform::ChildExitReason::Exited,
+                    exit_status: None,
                 }
             }
             ev => ev,
@@ -245,6 +246,7 @@ impl App {
             AppEvent::PaneDied {
                 pane_id,
                 exit_reason,
+                ..
             } if exit_reason.requires_session_checkpoint() && self.find_pane(*pane_id).is_some() && !self.overlay_panes.contains_key(pane_id)
         );
         if checkpointed_pane_exit {
@@ -2018,6 +2020,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         });
 
         let overlay_tab = &app.state.workspaces[0].tabs[0];
@@ -2047,6 +2050,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: dead_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         });
 
         let events = event_hub.events_after(0);
@@ -2205,6 +2209,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         });
 
         let events = event_hub.events_after(0);
@@ -2231,6 +2236,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         });
 
         let tab = &app.state.workspaces[0].tabs[0];
@@ -2251,6 +2257,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         });
 
         let tab = &app.state.workspaces[0].tabs[0];
@@ -2293,6 +2300,7 @@ mod tests {
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id,
             exit_reason: crate::platform::ChildExitReason::Exited,
+            exit_status: None,
         });
 
         assert!(

@@ -2411,6 +2411,7 @@ impl PaneRuntime {
                 let _ = rt.block_on(exit_events.send(AppEvent::PaneDied {
                     pane_id,
                     exit_reason: crate::platform::ChildExitReason::Handoff,
+                    exit_status: None,
                 }));
                 debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
             });
@@ -2507,6 +2508,7 @@ impl PaneRuntime {
         let content_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let (reader_exit_tx, reader_exit_rx) = std::sync::mpsc::sync_channel::<()>(1);
         {
             let child_pid = child_pid.clone();
             let child_wait_completed = child_wait_completed.clone();
@@ -2518,23 +2520,33 @@ impl PaneRuntime {
                 crate::logging::pane_spawned(pane_id.raw(), pid);
             }
             tokio::task::spawn_blocking(move || {
-                let exit_reason = match child.wait() {
+                let (exit_reason, exit_status) = match child.wait() {
                     Ok(status) => {
                         let exit_reason = crate::platform::classify_child_exit(&status);
                         let status_text = format!("{status:?}");
                         crate::logging::pane_exited(pane_id.raw(), &status_text);
-                        exit_reason
+                        let exit_status = if status.signal().is_some()
+                            || exit_reason == crate::platform::ChildExitReason::Interrupted
+                        {
+                            None
+                        } else {
+                            Some(status.exit_code())
+                        };
+                        (exit_reason, exit_status)
                     }
                     Err(e) => {
                         crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string());
-                        crate::platform::ChildExitReason::WaitFailed
+                        (crate::platform::ChildExitReason::WaitFailed, None)
                     }
                 };
                 child_wait_completed.store(true, Ordering::Release);
+                // Let the reader parse the child's last output before the server reads the screen
+                let _ = reader_exit_rx.recv_timeout(std::time::Duration::from_millis(250));
                 // Use blocking send — PaneDied is critical, must not be dropped
                 if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied {
                     pane_id,
                     exit_reason,
+                    exit_status,
                 })) {
                     error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
                 }
@@ -2602,6 +2614,9 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
+            let on_reader_exit = Box::new(move || {
+                let _ = reader_exit_tx.send(());
+            });
             PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
                 #[cfg(unix)]
@@ -2610,7 +2625,7 @@ impl PaneRuntime {
                 master: spawned.master,
                 initially_quiesced: false,
                 on_read,
-                on_reader_exit: None,
+                on_reader_exit: Some(on_reader_exit),
             })?)
         };
 

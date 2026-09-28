@@ -97,3 +97,24 @@ impl From<protocol::FramingError> for ClientError {
         }
     }
 }
+
+/// Typed error for terminal attach failures during connect or startup.
+#[derive(Debug)]
+pub enum TerminalAttachError {
+    ErrorReply(String),
+    ServerShutdown(Option<String>),
+}
+
+impl std::fmt::Display for TerminalAttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TerminalAttachError::ErrorReply(msg) => write!(f, "{msg}"),
+            TerminalAttachError::ServerShutdown(Some(reason)) => {
+                write!(f, "server shut down: {reason}")
+            }
+            TerminalAttachError::ServerShutdown(None) => write!(f, "server shut down"),
+        }
+    }
+}
+
+impl std::error::Error for TerminalAttachError {}
