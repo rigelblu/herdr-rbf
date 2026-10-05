@@ -684,53 +684,42 @@ impl HeadlessServer {
                             })
                         });
                 let terminal_id = pane_context.as_ref().map(|(_, _, _, tid)| tid.clone());
-                let is_worktree_or_handoff =
-                    matches!(ev, AppEvent::WorktreeRuntimeRestoreFailed { .. })
-                        || matches!(
-                            &ev,
-                            AppEvent::PaneDied { exit_reason, .. } if exit_reason.is_handoff()
-                        )
-                        || self
-                            .app
-                            .pending_worktree_remove_runtime_exits
-                            .contains_key(&pane_id_val);
+                // Herdr closed these panes itself; no program quit in them
+                let is_worktree_exit = matches!(ev, AppEvent::WorktreeRuntimeRestoreFailed { .. })
+                    || self
+                        .app
+                        .pending_worktree_remove_runtime_exits
+                        .contains_key(&pane_id_val);
 
-                let exit_message = if is_worktree_or_handoff {
+                let exit_message = if is_worktree_exit {
                     let tid = terminal_id.as_deref().unwrap_or("unknown");
                     format!("terminal {tid} exited")
                 } else if let Some((ws_idx, tab_label, agent, ref tid)) = pane_context {
                     let name = tab_label
+                        .map(|label| crate::exit_report::printable(&label).trim().to_string())
+                        .filter(|label| !label.is_empty())
                         .or_else(|| agent.map(crate::detect::agent_label).map(str::to_string))
                         .unwrap_or_else(|| format!("terminal {tid}"));
-                    match exit_status_val {
-                        Some(0) => format!("{name} exited with status 0"),
-                        Some(code) => {
-                            let mut msg = format!("{name} exited with status {code}");
-                            if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                                &self.app.terminal_runtimes,
-                                ws_idx,
-                                pane_id_val,
-                            ) {
-                                let snapshot = runtime.recent_unwrapped_text_snapshot(50);
-                                let non_blank_lines: Vec<&str> = snapshot
-                                    .text
-                                    .lines()
-                                    .map(str::trim_end)
-                                    .filter(|line| !line.trim().is_empty())
-                                    .collect();
-                                let take_count = non_blank_lines.len().min(10);
-                                let last_lines =
-                                    &non_blank_lines[non_blank_lines.len() - take_count..];
-                                for line in last_lines {
-                                    msg.push('\n');
-                                    msg.push_str("  ");
-                                    msg.push_str(line);
-                                }
-                            }
-                            msg
-                        }
-                        None => format!("{name} exited"),
-                    }
+                    // Every exit carries what the program left on screen: a resume
+                    // command after a normal quit, the error after a failed start
+                    let screen = self
+                        .app
+                        .state
+                        .runtime_for_pane_in_workspace(
+                            &self.app.terminal_runtimes,
+                            ws_idx,
+                            pane_id_val,
+                        )
+                        .map(|runtime| {
+                            let rows = runtime
+                                .terminal_dimensions()
+                                .map_or(0, |(_, rows)| usize::from(rows));
+                            runtime.recent_unwrapped_text_snapshot(
+                                rows.max(crate::exit_report::MIN_SCREEN_ROWS),
+                            )
+                        })
+                        .unwrap_or_default();
+                    crate::exit_report::message(&name, exit_status_val, &screen.text)
                 } else {
                     let tid = terminal_id.as_deref().unwrap_or("unknown");
                     format!("terminal {tid} exited")

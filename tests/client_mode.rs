@@ -481,80 +481,299 @@ fn semantic_attach_keeps_drawing_after_the_first_frame() {
     cleanup_spawned_herdr(attach, base);
 }
 
+/// What the launching terminal shows once the client has left its full-screen view
+/// for the last time. Before that point the client paints the pane itself, so the
+/// pane's text is in the capture whatever the client prints afterwards.
+fn screen_after_full_screen_view(output: &SharedOutput) -> Vec<String> {
+    const LEAVE_FULL_SCREEN: &[u8] = b"\x1b[?1049l";
+    let bytes = output
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .bytes
+        .clone();
+    let start = bytes
+        .windows(LEAVE_FULL_SCREEN.len())
+        .rposition(|window| window == LEAVE_FULL_SCREEN)
+        .map_or(0, |at| at + LEAVE_FULL_SCREEN.len());
+    // Wider than the client's PTY, so a long status line stays on one row.
+    terminal_screen::text(&bytes[start..], 200, 24)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Waits until the client's output ends with herdr's line for `status` and one line
+/// break. The screen read below trims trailing blank rows, so only the raw bytes can
+/// show a stray blank line after herdr's line.
+fn assert_output_ends_with_status_line(output: &SharedOutput, status: u32) {
+    let end = format!("exited with status {status}\r\n");
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+            read_output(output).ends_with(&end)
+        }),
+        "herdr's line should end the client's output; output: {:?}",
+        read_output(output)
+    );
+    // Anything the client still had to write would land within this beat.
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        read_output(output).ends_with(&end),
+        "nothing follows herdr's line; output: {:?}",
+        read_output(output)
+    );
+}
+
+/// Splits an exit report into the program's lines and herdr's line, and checks the
+/// layout between them: herdr's line last, one blank line above it.
+fn split_exit_report(screen: &[String]) -> (&[String], &str) {
+    let Some((herdr_line, above)) = screen.split_last() else {
+        panic!("the client printed nothing");
+    };
+    assert!(
+        herdr_line.starts_with("herdr: "),
+        "herdr's line must be the last one; screen: {screen:?}"
+    );
+    let Some((blank, program_lines)) = above.split_last() else {
+        panic!("no program lines above herdr's line; screen: {screen:?}");
+    };
+    assert_eq!(
+        blank, "",
+        "one blank line sits above herdr's line; screen: {screen:?}"
+    );
+    assert_ne!(
+        program_lines.last().map(String::as_str),
+        Some(""),
+        "exactly one blank line sits above herdr's line; screen: {screen:?}"
+    );
+    (program_lines, herdr_line)
+}
+
+/// A server with one workspace, and a `terminal attach` client connected to its pane.
+struct AttachedPane {
+    server: SpawnedHerdr,
+    attach: SpawnedHerdr,
+    output: SharedOutput,
+    api_socket: PathBuf,
+    pane_id: String,
+    base: PathBuf,
+}
+
+impl AttachedPane {
+    fn start() -> Self {
+        let base = unique_test_dir();
+        let config_home = base.join("config");
+        let runtime_dir = base.join("runtime");
+        let api_socket = runtime_dir.join("herdr.sock");
+        let client_socket = runtime_dir.join("herdr-client.sock");
+
+        let server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+        wait_for_socket(&api_socket, Duration::from_secs(10));
+        wait_for_socket(&client_socket, Duration::from_secs(10));
+
+        let created = send_json_request(
+            &api_socket,
+            &serde_json::json!({
+                "id": "create-ws-attached-pane",
+                "method": "workspace.create",
+                "params": {"cwd": base},
+            })
+            .to_string(),
+        );
+        let terminal_id = created["result"]["root_pane"]["terminal_id"]
+            .as_str()
+            .expect("created terminal id")
+            .to_string();
+        let pane_id = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .expect("created pane id")
+            .to_string();
+
+        let attach = spawn_client_process_with_args(
+            &config_home,
+            &runtime_dir,
+            &api_socket,
+            &["terminal", "attach", &terminal_id],
+        );
+        let output = spawn_pty_drain(
+            attach
+                ._master
+                .as_ref()
+                .expect("attach master")
+                .try_clone_reader()
+                .expect("clone attach PTY reader"),
+        );
+        // The client sets its terminal up only once the attach has connected, so
+        // from here the pane's exit reaches it as a shutdown.
+        assert!(
+            wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+                read_output(&output).contains("\x1b[?7l")
+            }),
+            "attach should connect; output: {:?}",
+            read_output(&output)
+        );
+
+        Self {
+            server,
+            attach,
+            output,
+            api_socket,
+            pane_id,
+            base,
+        }
+    }
+
+    /// Waits for the pane's program to exit with `status` and the client to quit, then
+    /// returns what the launching terminal shows after the client's full-screen view.
+    fn screen_after_exit(&mut self, status: u32) -> Vec<String> {
+        assert_output_ends_with_status_line(&self.output, status);
+        let exit = self.attach.child.wait().expect("wait for attach client");
+        assert_eq!(
+            exit.exit_code(),
+            1,
+            "the attach client exits 1 on every pane exit"
+        );
+        screen_after_full_screen_view(&self.output)
+    }
+
+    fn cleanup(self) {
+        drop(self.server);
+        cleanup_spawned_herdr(self.attach, self.base);
+    }
+}
+
 #[test]
 fn terminal_attach_prints_exit_status_and_screen_lines_after_attach() {
     let _lock = test_lock();
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let api_socket = runtime_dir.join("herdr.sock");
-    let client_socket = runtime_dir.join("herdr-client.sock");
+    let mut pane = AttachedPane::start();
 
-    let spawned_server = spawn_server_with_config(
-        &config_home,
-        &runtime_dir,
-        &api_socket,
-        &client_socket,
-        "onboarding = false\n",
-    );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
-
-    let created = send_json_request(
-        &api_socket,
-        &serde_json::json!({
-            "id": "create-ws-slow-exit",
-            "method": "workspace.create",
-            "params": {"cwd": base},
-        })
-        .to_string(),
-    );
-    let terminal_id = created["result"]["root_pane"]["terminal_id"]
-        .as_str()
-        .expect("created terminal id")
-        .to_string();
-    let pane_id = created["result"]["root_pane"]["pane_id"]
-        .as_str()
-        .expect("created pane id")
-        .to_string();
-
-    let mut attach = spawn_client_process_with_args(
-        &config_home,
-        &runtime_dir,
-        &api_socket,
-        &["terminal", "attach", &terminal_id],
-    );
-    let output = spawn_pty_drain(
-        attach
-            ._master
-            .as_ref()
-            .expect("attach master")
-            .try_clone_reader()
-            .expect("clone attach PTY reader"),
+    send_pane_shell_command(
+        &pane.api_socket,
+        &pane.pane_id,
+        "sleep 1; echo boom; exit 3",
     );
 
-    thread::sleep(Duration::from_millis(500));
-    send_pane_shell_command(&api_socket, &pane_id, "sleep 1; echo boom; exit 3");
-
+    let screen = pane.screen_after_exit(3);
+    let (program_lines, herdr_line) = split_exit_report(&screen);
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
-            let out = read_output(&output);
-            out.contains("exited with status 3") && out.contains("boom")
-        }),
-        "client should receive exit message; output: {:?}",
-        read_output(&output)
+        herdr_line.starts_with("herdr: server shut down: ")
+            && herdr_line.ends_with("exited with status 3"),
+        "an exit after connect arrives as a shutdown; screen: {screen:?}"
     );
     assert!(
-        read_output(&output).contains("herdr: server shut down: "),
-        "an exit after connect arrives as a shutdown"
+        program_lines.iter().any(|line| line == "boom"),
+        "the program's output prints above herdr's line, with no indent; screen: {screen:?}"
     );
 
-    let status = attach.child.wait().expect("wait for attach client");
-    assert!(!status.success());
-    assert_eq!(status.exit_code(), 1);
+    pane.cleanup();
+}
 
-    drop(spawned_server);
-    cleanup_spawned_herdr(attach, base);
+#[test]
+fn terminal_attach_prints_screen_lines_above_status_on_normal_exit() {
+    let _lock = test_lock();
+    let mut pane = AttachedPane::start();
+
+    // `exec`, so the pane's last line is the program's own: an interactive shell
+    // would print `exit` under it.
+    send_pane_shell_command(
+        &pane.api_socket,
+        &pane.pane_id,
+        "exec sh -c 'sleep 1; echo bye-9d2f'",
+    );
+
+    let screen = pane.screen_after_exit(0);
+    let (program_lines, herdr_line) = split_exit_report(&screen);
+    assert!(
+        herdr_line.starts_with("herdr: server shut down: ")
+            && herdr_line.ends_with("exited with status 0"),
+        "a normal exit names the program and its status; screen: {screen:?}"
+    );
+    assert_eq!(
+        program_lines.last().map(String::as_str),
+        Some("bye-9d2f"),
+        "a normal exit prints what the program left on screen; screen: {screen:?}"
+    );
+
+    pane.cleanup();
+}
+
+#[test]
+fn terminal_attach_prints_text_a_full_screen_program_left() {
+    let _lock = test_lock();
+    let mut pane = AttachedPane::start();
+
+    // An agent's quit: leave the full-screen view, then print a resume hint in gray.
+    // It runs from a file: typed at the prompt, its text would sit on the pane's screen.
+    let program = pane.base.join("full-screen-quit.sh");
+    fs::write(
+        &program,
+        concat!(
+            "printf '\\033[?1049h\\033[2J\\033[HFULLSCREEN FRAME\\n'\n",
+            "sleep 1\n",
+            "printf '\\033[?1049l\\n'\n",
+            "printf '\\033[90mResume this session with:\\033[0m\\n'\n",
+            "printf '\\033[90mclaude --resume bf270e08-dee2\\033[0m\\n'\n",
+            "exit 0\n",
+        ),
+    )
+    .expect("write the full-screen program");
+    send_pane_shell_command(
+        &pane.api_socket,
+        &pane.pane_id,
+        &format!("exec sh {}", program.display()),
+    );
+
+    let screen = pane.screen_after_exit(0);
+    let (program_lines, herdr_line) = split_exit_report(&screen);
+    assert!(
+        herdr_line.ends_with("exited with status 0"),
+        "screen: {screen:?}"
+    );
+    assert!(
+        program_lines.ends_with(&[
+            "Resume this session with:".to_string(),
+            "claude --resume bf270e08-dee2".to_string(),
+        ]),
+        "the resume command prints as the program wrote it, ready to paste; screen: {screen:?}"
+    );
+    assert!(
+        !screen.iter().any(|line| line.contains("FULLSCREEN FRAME")),
+        "the full-screen view the program left must not print; screen: {screen:?}"
+    );
+
+    pane.cleanup();
+}
+
+#[test]
+fn terminal_attach_detach_prints_nothing_and_exits_zero() {
+    let _lock = test_lock();
+    let mut pane = AttachedPane::start();
+
+    let detach_watermark = output_len(&pane.output);
+    pane.attach
+        ._master
+        .as_ref()
+        .expect("attach master")
+        .take_writer()
+        .expect("attach PTY writer")
+        .write_all(b"\x02q")
+        .expect("detach attach client");
+    drain_until_client_exits(&mut pane.attach, &pane.output, detach_watermark);
+
+    assert!(
+        pane.attach
+            .child
+            .wait()
+            .expect("wait for attach client")
+            .success(),
+        "a detach exits 0"
+    );
+    let screen = screen_after_full_screen_view(&pane.output);
+    assert!(
+        screen.is_empty(),
+        "a detach is no pane exit, so it prints no report; screen: {screen:?}"
+    );
+
+    pane.cleanup();
 }
 
 #[test]
@@ -633,7 +852,6 @@ fn terminal_attach_prints_exit_status_and_screen_lines_before_attach() {
 
     let out = read_output(&output);
     assert!(!out.contains("Custom {"));
-    assert!(out.contains("herdr: "));
     assert!(
         !out.contains("server shut down"),
         "an exit before connect is an error reply, not a shutdown"
@@ -642,6 +860,18 @@ fn terminal_attach_prints_exit_status_and_screen_lines_before_attach() {
     let status = attach.child.wait().expect("wait for attach client");
     assert!(!status.success());
     assert_eq!(status.exit_code(), 1);
+
+    assert_output_ends_with_status_line(&output, 3);
+    let screen = screen_after_full_screen_view(&output);
+    let (program_lines, herdr_line) = split_exit_report(&screen);
+    assert!(
+        herdr_line.ends_with("exited with status 3"),
+        "screen: {screen:?}"
+    );
+    assert!(
+        program_lines.iter().any(|line| line == "boom"),
+        "the program's output prints above herdr's line, with no indent; screen: {screen:?}"
+    );
 
     drop(spawned_server);
     cleanup_spawned_herdr(attach, base);
