@@ -24,6 +24,7 @@ mod config;
 mod copy_mode;
 mod detect;
 mod events;
+mod exit_report;
 mod ghostty;
 mod handoff_runtime;
 mod input;

@@ -5678,16 +5678,42 @@ async fn terminal_attach_receives_status_and_screen_lines_on_failure() {
     );
 }
 
-#[tokio::test]
-async fn terminal_attach_receives_status_only_on_success() {
+/// The shutdown reason an attached client receives when a pane labelled `label`,
+/// whose screen holds `screen_content`, dies with `exit_reason` and `exit_status`.
+fn attached_client_reason_for_pane_exit(
+    label: &str,
+    screen_content: &[u8],
+    exit_reason: crate::platform::ChildExitReason,
+    exit_status: Option<u32>,
+) -> String {
+    attached_client_reason_for_exit_of_pane_with_rows(
+        24,
+        label,
+        screen_content,
+        exit_reason,
+        exit_status,
+    )
+}
+
+fn attached_client_reason_for_exit_of_pane_with_rows(
+    rows: u16,
+    label: &str,
+    screen_content: &[u8],
+    exit_reason: crate::platform::ChildExitReason,
+    exit_status: Option<u32>,
+) -> String {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("attached");
     let pane_id = workspace.tabs[0].root_pane;
-    workspace.tabs[0].custom_name = Some("agent-worker".into());
-    let screen_content = b"line 1\r\nline 2\r\n";
+    workspace.tabs[0].custom_name = Some(label.into());
     workspace.insert_test_runtime(
         pane_id,
-        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen_content),
+        crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+            80,
+            rows,
+            1 << 20,
+            screen_content,
+        ),
     );
     server.app.state.workspaces = vec![workspace];
     server.app.state.ensure_test_terminals();
@@ -5695,8 +5721,7 @@ async fn terminal_attach_receives_status_only_on_success() {
         .pane_state(pane_id)
         .expect("pane")
         .attached_terminal_id
-        .clone();
-    let terminal_id_string = terminal_id.to_string();
+        .to_string();
     let (writer, control_rx, _render_rx) = test_client_writer();
 
     assert!(!server.handle_server_event(ServerEvent::ClientConnected {
@@ -5711,7 +5736,7 @@ async fn terminal_attach_receives_status_only_on_success() {
     assert!(
         server.handle_server_event(ServerEvent::ClientAttachTerminal {
             client_id: 7,
-            terminal_id: terminal_id_string.clone(),
+            terminal_id,
             takeover: false,
         })
     );
@@ -5719,65 +5744,126 @@ async fn terminal_attach_receives_status_only_on_success() {
     assert!(
         server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
             pane_id,
-            exit_reason: crate::platform::ChildExitReason::Exited,
-            exit_status: Some(0),
+            exit_reason,
+            exit_status,
         })
     );
 
-    let reason =
-        read_server_shutdown_reason(control_rx.recv().expect("shutdown message")).expect("reason");
-    assert_eq!(reason, "agent-worker exited with status 0");
+    read_server_shutdown_reason(control_rx.recv().expect("shutdown message")).expect("reason")
+}
+
+#[tokio::test]
+async fn terminal_attach_receives_status_and_screen_lines_on_success() {
+    let reason = attached_client_reason_for_pane_exit(
+        "agent-worker",
+        b"line 1\r\nline 2\r\n",
+        crate::platform::ChildExitReason::Exited,
+        Some(0),
+    );
+    assert_eq!(
+        reason,
+        "agent-worker exited with status 0\n  line 1\n  line 2"
+    );
 }
 
 #[tokio::test]
 async fn terminal_attach_receives_name_exited_when_status_unknown() {
-    let mut server = test_headless_server();
-    let mut workspace = crate::workspace::Workspace::test_new("attached");
-    let pane_id = workspace.tabs[0].root_pane;
-    workspace.tabs[0].custom_name = Some("pi".into());
-    let screen_content = b"line 1\r\nline 2\r\n";
-    workspace.insert_test_runtime(
-        pane_id,
-        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen_content),
+    let reason = attached_client_reason_for_pane_exit(
+        "pi",
+        b"line 1\r\nline 2\r\n",
+        crate::platform::ChildExitReason::Exited,
+        None,
     );
-    server.app.state.workspaces = vec![workspace];
-    server.app.state.ensure_test_terminals();
-    let terminal_id = server.app.state.workspaces[0]
-        .pane_state(pane_id)
-        .expect("pane")
-        .attached_terminal_id
-        .clone();
-    let terminal_id_string = terminal_id.to_string();
-    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert_eq!(reason, "pi exited\n  line 1\n  line 2");
+}
 
-    assert!(!server.handle_server_event(ServerEvent::ClientConnected {
-        client_id: 7,
-        cols: 80,
-        rows: 24,
-        cell_width_px: 0,
-        cell_height_px: 0,
-        pixel_mouse: false,
-        writer,
-    }));
+// An agent that was running when an install landed: the replacement server reports
+// its later exit as `Handoff`, with no status.
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_attach_receives_lines_for_a_pane_imported_by_handoff() {
+    let reason = attached_client_reason_for_pane_exit(
+        "claude",
+        b"line 1\r\nline 2\r\n",
+        crate::platform::ChildExitReason::Handoff,
+        None,
+    );
+    assert_eq!(reason, "claude exited\n  line 1\n  line 2");
+}
+
+#[tokio::test]
+async fn terminal_attach_receives_status_line_alone_for_blank_screen() {
+    let reason = attached_client_reason_for_pane_exit(
+        "agent-worker",
+        b"\r\n   \r\n\r\n",
+        crate::platform::ChildExitReason::Exited,
+        Some(0),
+    );
+    assert_eq!(reason, "agent-worker exited with status 0");
+}
+
+// The terminal parser swallows a title sequence, a bell and a color code. DEL it keeps
+// on screen, and a tab label is any text the API was given.
+#[tokio::test]
+async fn terminal_attach_exit_message_holds_no_control_characters() {
+    let reason = attached_client_reason_for_pane_exit(
+        "agent\x1b[31m-worker\x07",
+        b"\x1b]0;pwned\x07\x07\x1b[31mred\x1b[0m d\x7fel\r\n",
+        crate::platform::ChildExitReason::Exited,
+        Some(0),
+    );
+    assert_eq!(reason, "agent[31m-worker exited with status 0\n  red del");
+}
+
+// With nothing printable in it, the label names nothing: fall back as for no label.
+#[tokio::test]
+async fn terminal_attach_names_the_terminal_when_the_label_is_only_control_characters() {
+    let reason = attached_client_reason_for_pane_exit(
+        "\x07 \x1b",
+        b"line 1\r\n",
+        crate::platform::ChildExitReason::Exited,
+        Some(0),
+    );
     assert!(
-        server.handle_server_event(ServerEvent::ClientAttachTerminal {
-            client_id: 7,
-            terminal_id: terminal_id_string.clone(),
-            takeover: false,
-        })
+        reason.starts_with("terminal term_") && reason.ends_with(" exited with status 0\n  line 1"),
+        "{reason:?}"
     );
+}
 
-    assert!(
-        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
-            pane_id,
-            exit_reason: crate::platform::ChildExitReason::Exited,
-            exit_status: None,
-        })
+// A pane shorter than 10 rows still gives 10 lines: the read reaches into what scrolled
+// off its screen.
+#[tokio::test]
+async fn terminal_attach_receives_ten_lines_from_a_pane_shorter_than_ten_rows() {
+    let screen: String = (1..=15).map(|n| format!("line {n}\r\n")).collect();
+    let reason = attached_client_reason_for_exit_of_pane_with_rows(
+        6,
+        "agent-worker",
+        screen.as_bytes(),
+        crate::platform::ChildExitReason::Exited,
+        Some(0),
     );
+    let expected: String = (6..=15).map(|n| format!("\n  line {n}")).collect();
+    assert_eq!(
+        reason,
+        format!("agent-worker exited with status 0{expected}")
+    );
+}
 
-    let reason =
-        read_server_shutdown_reason(control_rx.recv().expect("shutdown message")).expect("reason");
-    assert_eq!(reason, "pi exited");
+// A full-screen program that dies inside its view, in a pane taller than the rows a
+// main-screen read needs: its text sits at the top, above the last 50 rows.
+#[tokio::test]
+async fn terminal_attach_receives_lines_from_the_top_of_a_tall_full_screen_view() {
+    let reason = attached_client_reason_for_exit_of_pane_with_rows(
+        70,
+        "agent-worker",
+        b"\x1b[?1049h\x1b[2J\x1b[Hline 1\r\nline 2\r\n",
+        crate::platform::ChildExitReason::Exited,
+        Some(3),
+    );
+    assert_eq!(
+        reason,
+        "agent-worker exited with status 3\n  line 1\n  line 2"
+    );
 }
 
 #[tokio::test]

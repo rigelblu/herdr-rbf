@@ -363,7 +363,20 @@ fn run_client_with_mode(
     let terminal_restore_failed = terminal_guard.restore().is_err();
 
     if let Err(err) = result {
-        let _ = writeln!(io::stderr(), "herdr: {err}");
+        // A terminal attach prints a pane's exit with the program's lines first, and
+        // no control character a server sent
+        let ending = if requested_attach {
+            let report = match &err {
+                ClientError::ServerShutdown {
+                    reason: Some(reason),
+                } => crate::exit_report::layout(crate::exit_report::SHUTDOWN_PREFIX, reason),
+                _ => None,
+            };
+            crate::exit_report::attach_ending(report, &err)
+        } else {
+            format!("herdr: {err}")
+        };
+        let _ = writeln!(io::stderr(), "{ending}");
         rt.shutdown_timeout(Duration::from_millis(100));
         crate::logging::shutdown("client");
 
