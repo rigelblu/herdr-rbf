@@ -8,6 +8,18 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.10.0 (2026-10-05)
+## 🟠⋯ 🚨 Breaking Changes for End Users
+- 2026-10-05 - feat (BREAKING ux) | A failed agent's output prints in a new order: its lines first, with no indent, then a blank line, then herdr's line. They used to follow herdr's line, indented two spaces (#hrdr-23)
+
+## 🟠⋯ Added for End Users
+- 2026-10-05 - feat (user need) | When I quit an agent, the tab keeps what it printed on the way out, such as its resume command, with herdr's line under it. I can paste the resume command instead of hunting for the conversation. It holds for an agent that was already running when I installed. Sessions pick it up at install, no restart needed (#hrdr-23)
+
+## 🟠⋯ Changed for Technical Users
+- 2026-10-05 - feat (technical) | The error text of a refused `terminal.attach`, and the `reason` in the `terminal.closed` JSON line from `herdr terminal session observe` and `control`, carry the program's last lines after every exit, not only a failed one. Control characters are removed from those lines and from the name. The status line's wording is unchanged (#hrdr-23)
+
+---
+
 # 🔵⋯ v0.9.3 (2026-09-28)
 ## 🟠⋯ Fixed for End Users
 - 2026-09-28 - fix (user need) | When an agent I start quits right away, the tab says which agent quit, its exit status, and its last lines of output, instead of "server shut down: terminal … exited". A normal quit prints one status line. Sessions pick it up at install, no restart needed (#hrdr-18)
