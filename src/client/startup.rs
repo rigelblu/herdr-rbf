@@ -19,7 +19,8 @@ pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()
             .get_ref()
             .and_then(|e| e.downcast_ref::<TerminalAttachError>())
         {
-            eprintln!("herdr: {attach_err}");
+            let report = crate::exit_report::attach_error_layout(attach_err);
+            eprintln!("{}", crate::exit_report::attach_ending(report, attach_err));
             std::process::exit(1);
         }
     }

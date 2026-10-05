@@ -24,6 +24,7 @@ mod config;
 mod copy_mode;
 mod detect;
 mod events;
+mod exit_report;
 use ghostty_vt as ghostty;
 mod handoff_runtime;
 mod input;
