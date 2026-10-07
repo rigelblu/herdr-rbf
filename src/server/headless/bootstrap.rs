@@ -7,6 +7,9 @@ pub fn run_server() -> io::Result<()> {
     crate::platform::ignore_server_hangup();
     let args: Vec<String> = std::env::args().collect();
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
+    if !handoff_import {
+        crate::session_expiry::touch_at_fresh_start();
+    }
     let process_context = crate::platform::prepare_server_process(handoff_import);
     init_logging();
     if let Some(warning) = launcher_warning {

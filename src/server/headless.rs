@@ -82,6 +82,7 @@ mod native_graphics;
 mod notifications;
 mod render;
 mod retained_surface;
+mod session_expiry_hook;
 mod surface_interest;
 mod terminal_attach_title;
 
@@ -455,6 +456,7 @@ impl HeadlessServer {
                 continue;
             }
 
+            self.check_session_expiry();
             // Check if we should start shutting down.
             if self.app.state.should_quit || self.should_quit.load(Ordering::Acquire) {
                 self.drain_internal_events_with_forwarding_up_to(
@@ -969,6 +971,7 @@ impl HeadlessServer {
         });
         let was_foreground = self.foreground_client_id == Some(client_id);
         let removed = self.clients.remove(&client_id);
+        self.touch_in_use_if_last_client_left();
         self.tab_geometry_controllers
             .retain(|_, controller_id| *controller_id != client_id);
         if let Some(mut removed) = removed {
