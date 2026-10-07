@@ -277,6 +277,10 @@ pub struct SessionConfig {
     pub resume_agents_on_restore: bool,
     /// Milliseconds between automatic agent restores. Zero disables spacing.
     pub startup_per_agent_delay_ms: u32,
+    /// Hours after a stopped session was last in use before a running server removes it.
+    /// In use means a client connected, or an agent working or blocked. Decimals allowed.
+    /// Zero turns removal off. Default: 72.
+    pub remove_inactive_after_hours: f64,
 }
 
 impl Default for SessionConfig {
@@ -284,6 +288,7 @@ impl Default for SessionConfig {
         Self {
             resume_agents_on_restore: true,
             startup_per_agent_delay_ms: 100,
+            remove_inactive_after_hours: 72.0,
         }
     }
 }

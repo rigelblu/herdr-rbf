@@ -10,6 +10,10 @@
 #          herdr-agent-refuse herdr-agent-same-build herdr-agent-after-build herdr-agent-interrupted
 #          herdr-agent-first-install herdr-agent-no-relink herdr-agent-offline herdr-agent-first-rollback
 #          herdr-agent-exit-3 herdr-agent-interrupted-plain herdr-agent-undo herdr-agent-previous-fails
+#          short-limit
+#
+# short-limit is hrdr-19's Scenario 22. It installs nothing: it is here because this is the
+# harness that runs the release build in its own config folder.
 #
 # herdr-agent-after-build, herdr-agent-exit-3 and herdr-agent-interrupted-plain start real
 # sessions, so they need target/release/herdr built; the other herdr-agent cases don't.
@@ -1576,6 +1580,24 @@ case_herdr_agent_previous_fails() {
   done
 }
 
+# hrdr-19 Scenario 22: the release build treats a limit under an hour as off, so a mistyped
+# decimal can't empty the list. Every other hrdr-19 check runs a debug build, which acts on
+# any positive limit. 150 seconds is two checks and then some.
+case_short_limit() {
+  local old="$CONFIG_DIR/sessions/old"
+  printf '\n[session]\nremove_inactive_after_hours = 0.02\n' >> "$CONFIG_DIR/config.toml"
+  mkdir -p "$old"
+  : > "$old/herdr-server.log"
+  : > "$old/session.json"
+  touch -t 202610010000 "$old/herdr-server.log" "$old/session.json"
+  start_session work
+  sleep 150
+  check "the server checked in the last two minutes" \
+    [ -n "$(find "$CONFIG_DIR/sessions/work/in-use-check" -mmin -2 2> /dev/null)" ]
+  check "a limit of 0.02 hours removed nothing" [ -d "$old" ]
+  check "the old session's files are still there" [ -e "$old/session.json" ]
+}
+
 # ---------------------------------------------------------------------------
 
 case "$CASE" in
@@ -1583,9 +1605,9 @@ case "$CASE" in
     herdr-agent-install | herdr-agent-only | herdr-agent-rollback | herdr-agent-no-previous | herdr-agent-no-gap | \
     herdr-agent-refuse | herdr-agent-same-build | herdr-agent-after-build | herdr-agent-interrupted | \
     herdr-agent-first-install | herdr-agent-no-relink | herdr-agent-offline | herdr-agent-first-rollback | \
-    herdr-agent-exit-3 | herdr-agent-interrupted-plain | herdr-agent-undo | herdr-agent-previous-fails) ;;
+    herdr-agent-exit-3 | herdr-agent-interrupted-plain | herdr-agent-undo | herdr-agent-previous-fails | short-limit) ;;
   *)
-    echo "usage: rbf/scripts/install-rbf.test.sh <dry-run|install|hosting|failed-handoff|interrupted-handoff|classify|rollback|refusals|first-install|path-shadow|alt-screen|attached-window|wedged|real-agent|busy-shell|herdr-agent-install|herdr-agent-only|herdr-agent-rollback|herdr-agent-no-previous|herdr-agent-no-gap|herdr-agent-refuse|herdr-agent-same-build|herdr-agent-after-build|herdr-agent-interrupted|herdr-agent-first-install|herdr-agent-no-relink|herdr-agent-offline|herdr-agent-first-rollback|herdr-agent-exit-3|herdr-agent-interrupted-plain|herdr-agent-undo|herdr-agent-previous-fails>" >&2
+    echo "usage: rbf/scripts/install-rbf.test.sh <dry-run|install|hosting|failed-handoff|interrupted-handoff|classify|rollback|refusals|first-install|path-shadow|alt-screen|attached-window|wedged|real-agent|busy-shell|herdr-agent-install|herdr-agent-only|herdr-agent-rollback|herdr-agent-no-previous|herdr-agent-no-gap|herdr-agent-refuse|herdr-agent-same-build|herdr-agent-after-build|herdr-agent-interrupted|herdr-agent-first-install|herdr-agent-no-relink|herdr-agent-offline|herdr-agent-first-rollback|herdr-agent-exit-3|herdr-agent-interrupted-plain|herdr-agent-undo|herdr-agent-previous-fails|short-limit>" >&2
     exit 2
     ;;
 esac
