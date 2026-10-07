@@ -698,6 +698,52 @@ async fn promoted_client_window_title_uses_its_own_view() {
     shutdown_test_runtimes(&mut server);
 }
 
+#[test]
+fn in_use_is_touched_when_the_client_map_empties() {
+    // Sets env vars with no lock: safe because nextest runs each test in its own process.
+    let config_home = std::env::temp_dir().join(format!("hh-in-use-{}", std::process::id()));
+    std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
+    let session_dir = crate::session::data_dir();
+    let in_use = session_dir.join("in-use");
+    let modified = || fs::metadata(&in_use).unwrap().modified().unwrap();
+    fs::create_dir_all(&session_dir).unwrap();
+    let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    fs::File::create(&in_use)
+        .unwrap()
+        .set_modified(an_hour_ago)
+        .unwrap();
+    let an_hour_ago = modified();
+
+    let mut server = test_headless_server();
+    for client_id in [1, 2] {
+        server.clients.insert(
+            client_id,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                client_id,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+    }
+
+    server.remove_client(1);
+    let after_first = modified();
+    // File times can be coarser than the clock, so compare from a second back.
+    let before_second = SystemTime::now() - Duration::from_secs(1);
+    server.remove_client(2);
+    let after_second = modified();
+
+    std::env::remove_var(crate::session::SESSION_ENV_VAR);
+    std::env::remove_var("XDG_CONFIG_HOME");
+    let _ = fs::remove_dir_all(&config_home);
+    shutdown_test_runtimes(&mut server);
+    assert_eq!(after_first, an_hour_ago);
+    assert!(after_second >= before_second);
+}
+
 fn test_client_writer() -> (
     ClientWriter,
     std::sync::mpsc::Receiver<Vec<u8>>,

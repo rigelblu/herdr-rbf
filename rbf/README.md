@@ -52,6 +52,7 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 
 ## 🟠⋯ Agents that outlive the terminal (herdr-agent)
 - Type `claude`, `codex`, `pi` or `agy` in a cmux tab and the agent runs inside this checkout's herdr session, shown in that tab. Closing the tab, or quitting or restarting cmux, doesn't stop it
+- A running session is never removed. Once a session has stopped, after a reboot for example, herdr removes it 3 days after it was last in use — see "Sessions I've stopped using are removed" below
 - `herdr-agent ps` lists what runs, and `herdr-agent attach` shows one in any tab. For a second view, another tab or a phone over SSH, use `herdr session attach <session>`
 - Resuming a session that's already running attaches to it instead of starting a second copy
 - After a cmux restart, a tab that showed an agent, or ran `herdr --remote <host>`, shows it again. claude's status and notifications follow the tab showing it
@@ -70,6 +71,28 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
   3. **Restart the session**: Launch an agent into that session from a healthy outer shell (for example, `HERDR_AGENT_SESSION=<session-name> <agent>`). The updated launcher verifies binary capability and starts a fresh server with the strict user context request. Stopping the server ends its pane processes; restart restores the workspace and tab layout with fresh shell processes.
   4. Never delete the session with `herdr session delete` during migration, or saved layout will be lost.
 - **Paired install requirement**: Strict macOS context adoption requires both the capability-bearing Herdr binary (`herdr --capability macos-strict-user-context`) and the matching `herdr-agent` launcher. Run `rbf/scripts/install-rbf.sh` to install both together. Do not use `rbf/scripts/install-rbf.sh --herdr-agent` alone when updating for this fix: an older Herdr binary will fail the capability check, and the launcher will refuse to start new servers until `install-rbf.sh` installs the matching binary.
+
+## 🟠⋯ Sessions I've stopped using are removed
+- A stopped session other than `default` is removed 3 days after it was last in use. Nothing to run: any running herdr server does it, within a minute or two of the session passing the limit
+- In use means a terminal window is showing the session, or an agent in it is `working` or `blocked`. Agent work counts: the 3 days start over each time an agent is `working` or `blocked`, so a session is still there 3 days after its agent finished
+- Any other program left running in a session, a dev server or a build watcher, doesn't count as use
+- Starting a session counts as using it. Stopping one doesn't, and neither does an install: a session keeps the time it was last in use across both
+- A running session is never removed, and neither is `default`
+- `herdr session list` deletes nothing. With no herdr server running, nothing is removed either: a stopped session past the limit stays in the list until a server has been up for two minutes
+- A removed session can't be restored. herdr deletes its saved layout and what it resumes each agent from, and `herdr session attach <name>` then starts an empty session with that name. Each agent's own history still has its conversation, such as `claude --resume` in the project folder
+- After a reboot, attach to a session within 3 days to keep it
+- herdr keeps no record of a removal. The server that did it writes one line to its own log, and that is all
+- Turn removal off with `remove_inactive_after_hours = 0` under `[session]` in `~/.config/herdr/config.toml`:
+  ```toml
+  [session]
+  remove_inactive_after_hours = 0
+  ```
+- The same key changes the limit. It's in hours, the default is `72`, and decimals work: `1.5` is 90 minutes
+- `inf` keeps every session too, and so does any value under `1`: the installed build treats a limit shorter than an hour as off
+- A change needs no restart. Every running server reads the file again each minute: `0` takes effect within a minute, a new limit within two
+- A value herdr can't read, or a config file that doesn't parse, turns removal off until it's fixed. A misspelled key is ignored and the default applies; `herdr config check` reports it
+- A server started with `HERDR_CONFIG_PATH` reads the limit from that file
+- After a rollback to a herdr older than 0.11.0, nothing is removed while it runs. At the next install a running session starts a fresh 3 days, and a stopped one the older herdr ran is aged by its newest file
 
 # 🔵⋯ Install
 ## 🟠⋯ Install your fork build as your daily `herdr`
