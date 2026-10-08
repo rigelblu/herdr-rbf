@@ -20,6 +20,7 @@
 #   6. replaces itself with the attach, so cmux keeps the process ID it recorded
 #
 # Commands
+#   herdr-agent open                 this folder's herdr session, in a shell here (bare herdr runs this)
 #   herdr-agent on | off | status   the switch; off runs every agent right here
 #   herdr-agent session [dir]       the herdr session a folder's agents go to
 #   herdr-agent ps [session]        the agents in herdr: session, pane, agent, status, tab name
@@ -44,13 +45,17 @@
 #   the contract: cmux's saved restore records and running agents keep them
 #
 # Settings (environment)
-#   HERDR_AGENT=off | on       skip herdr for one command, or use it even when switched off
+#   HERDR_AGENT=off | on       skip herdr for one command (covers bare herdr too), or use it even when switched off
 #   HERDR_AGENT_SESSION=name   use this herdr session instead of the checkout's
 #   HERDR_AGENT_ATTACH=cmd     attach with `cmd <session> <terminal> <pane>`
-#                              instead of `herdr terminal attach`
+#                              instead of `herdr terminal attach` or `herdr session attach`
 #   HERDR_AGENT_STATE_DIR=dir  keep the switch and tab notes here (the self-check uses it)
 #
 # Everyday use
+#   In a project folder, bare `herdr` opens this folder's herdr session, in a shell here.
+#   `command herdr` is plain herdr for one call.
+#   `herdr-agent off` switches bare `herdr` back to plain herdr.
+#   `herdr --session default` still opens the old session.
 #   Start agents as usual: claude, codex, pi, agy. In a cmux tab they run in herdr,
 #   and the tab shows them. These stay in the tab instead:
 #     one-shot runs and subcommands (claude -p, --help, pi -p, agy --prompt, claude mcp)
@@ -124,6 +129,10 @@ herdr_config=${XDG_CONFIG_HOME:-$HOME/.config}/herdr
 
 warn() { print -ru2 -- "herdr-agent: $*" }
 die() { warn "$@"; exit 1 }
+# open failure: reason line, then the line telling how to get plain herdr
+open_fail() { warn "$1"; die "nothing opened. For plain herdr: command herdr" }
+# an agent launch ends the same failure with its own advice (it reads `launch`'s local `agent`)
+launch_cap_fail() { die "$1, or run without herdr: HERDR_AGENT=off $agent" }
 nap() { zselect -t ${1:-10} 2>/dev/null || true }  # centiseconds
 
 # herdr with a time limit, so a stuck server can't hang a launch;
@@ -339,6 +348,13 @@ find_running() {
   return 1
 }
 
+# the workspace label for a checkout root: its folder's name, ~ for home, / for the root folder
+label_for() {
+  local name=${1:t}
+  [[ $1 == "${HOME:A}" ]] && name='~'
+  print -r -- ${name:-/}
+}
+
 checkout_root() {
   local dir=${1:A}
   while [[ $dir != / ]]; do
@@ -369,7 +385,7 @@ server_running() { h $1 workspace list >/dev/null 2>&1 }
 
 # A clean server: every pane's shell rebuilds its environment from the dotfiles
 start_server() {
-  local session=$1 dir=$herdr_config/sessions/$1 var tries=100
+  local session=$1 report=$2 dir=$herdr_config/sessions/$1 var tries=100
   local -a envs=(PATH=/usr/bin:/bin:/usr/sbin:/sbin)
   for var in HOME USER LOGNAME SHELL TMPDIR SSH_AUTH_SOCK LANG LC_ALL LC_CTYPE \
       __CF_USER_TEXT_ENCODING XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME; do
@@ -382,12 +398,11 @@ start_server() {
     # A mismatched pair is a broken install: stop, rather than run the agent outside
     # herdr where nothing says it isn't persistent
     if (( cap_status != 0 )) || [[ $cap_out != "macos-strict-user-context" ]]; then
-      die "herdr at $herdr can't start a server that survives logout (status $cap_status: ${cap_out//$'\n'/ })." \
-        "Reinstall the pair with rbf/scripts/install-rbf.sh, or run without herdr: HERDR_AGENT=off $agent"
+      $report "herdr at $herdr can't start a server that survives logout (status $cap_status: ${cap_out//$'\n'/ }). Reinstall the pair with rbf/scripts/install-rbf.sh"
     fi
     envs+=(HERDR_MACOS_SERVER_CONTEXT=strict)
   fi
-  mkdir -p -- $dir || return 1
+  { mkdir -p -- $dir && : >>$dir/herdr-agent-server.log } 2>/dev/null || return 1
   # Its own process session, so closing the terminal that started it can't hang it up
   /usr/bin/env -i "${envs[@]}" /usr/bin/perl -MPOSIX -e \
     'POSIX::setsid() or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' \
@@ -566,8 +581,7 @@ launch() {
   local root session label
   root=$(checkout_root $PWD)
   session=$(session_for $PWD)
-  label=${root:t}
-  [[ $root == "${HOME:A}" ]] && label='~'
+  label=$(label_for $root)
 
   # Launch files hold the whole environment, secrets included: a private folder only
   local launch_dir=${TMPDIR:-/tmp}/herdr-agent lock=$state_dir/locks/$session.lock lockfd
@@ -576,7 +590,7 @@ launch() {
     here "can't use $lock or $launch_dir"
   # one launch at a time per session, so two can't both start its server
   zsystem flock -t 30 -f lockfd $lock || here "couldn't lock $lock"
-  server_running $session || start_server $session ||
+  server_running $session || start_server $session launch_cap_fail ||
     here "herdr's $session server didn't start (log: $herdr_config/sessions/$session/herdr-agent-server.log)"
 
   local file=$launch_dir/$session.$agent.$$.$RANDOM
@@ -819,6 +833,94 @@ install_restart_entry() {
   print -r -- "added cmux restart entries $restart_id and $restart_id-remote to $file; approve them in cmux Settings"
 }
 
+# Bare herdr: open this folder's herdr session in a shell at this folder
+cmd_open() {
+  if is_off || inside_herdr || [[ ! -t 0 || ! -t 1 ]]; then
+    exec $herdr
+  fi
+  [[ -x $herdr ]] || open_fail "can't find herdr"
+  (( $+commands[jq] )) || open_fail "needs jq (brew install jq)"
+
+  local root session label
+  local folder=$PWD
+  root=$(checkout_root $folder)
+  session=$(session_for $folder)
+  label=$(label_for $root)
+  local no_tab="herdr couldn't open a shell tab in $session" no_show="herdr couldn't show the shell tab in $session"
+
+  # A failure stops here and never runs plain herdr: that would start a server this
+  # terminal owns, and open_fail says how to ask for plain herdr on purpose
+  local lock=$state_dir/locks/$session.lock lockfd
+  local cant_lock="couldn't lock $lock"
+  { mkdir -p -- ${lock:h} && : >>$lock } 2>/dev/null || open_fail $cant_lock
+  zsystem flock -t 30 -f lockfd $lock 2>/dev/null || open_fail $cant_lock
+
+  # The server is started here, with a clean environment, never left to `session attach`:
+  # attach would start one that keeps this terminal's environment
+  server_running $session || start_server $session open_fail ||
+    open_fail "herdr's $session server didn't start (log: $herdr_config/sessions/$session/herdr-agent-server.log)"
+
+  local ws_json ws created tab terminal pane
+  ws_json=$(h $session workspace list 2>/dev/null) || open_fail $no_tab
+  # an answer that isn't JSON (an empty one included) stops here, rather than read as "none found"
+  jq -e .result <<<$ws_json >/dev/null 2>&1 || open_fail $no_tab
+  ws=$(jq -r --arg label $label 'first(.result.workspaces[]? | select(.label == $label) | .workspace_id) // empty' <<<$ws_json 2>/dev/null)
+
+  if [[ -z $ws ]]; then
+    created=$(h $session workspace create --cwd $folder --label $label --no-focus 2>/dev/null) || open_fail $no_tab
+    ws=$(jq -r '.result.workspace.workspace_id // empty' <<<$created 2>/dev/null)
+    tab=$(jq -r '.result.tab.tab_id // empty' <<<$created 2>/dev/null)
+    terminal=$(jq -r '.result.root_pane.terminal_id // empty' <<<$created 2>/dev/null)
+    pane=$(jq -r '.result.root_pane.pane_id // empty' <<<$created 2>/dev/null)
+    [[ -n $ws && -n $tab && -n $terminal && -n $pane ]] || open_fail $no_tab
+    h $session tab rename $tab shell >/dev/null 2>&1 || open_fail $no_tab
+  else
+    local tabs_json panes_json agents_json rows t_tab t_pane t_term t_cwd
+    tabs_json=$(h $session tab list --workspace $ws 2>/dev/null) || open_fail $no_tab
+    jq -e .result <<<$tabs_json >/dev/null 2>&1 || open_fail $no_tab
+    panes_json=$(h $session pane list 2>/dev/null) || open_fail $no_tab
+    agents_json=$(h $session agent list 2>/dev/null) || open_fail $no_tab
+    # the shell tabs (label shell, one pane, no agent in them), each with its pane's folder
+    # last; @tsv escapes a tab, newline, carriage return or backslash in the folder
+    rows=$(jq -r --argjson panes "$panes_json" --argjson agents "$agents_json" '
+      [$agents.result.agents[]? | .tab_id] as $busy
+      | .result.tabs[]?
+      | select(.label == "shell" and .pane_count == 1 and (.tab_id as $t | $busy | index($t) | not))
+      | . as $tab
+      | first($panes.result.panes[]? | select(.tab_id == $tab.tab_id)) as $p
+      | [$tab.tab_id, $p.pane_id, $p.terminal_id, $p.cwd]
+      | select(all(.[0:3][]; . != null and . != ""))
+      | map(. // "") | @tsv' <<<$tabs_json 2>/dev/null) || open_fail $no_tab
+    while IFS=$'\t' read -r t_tab t_pane t_term t_cwd; do
+      [[ -n $t_cwd && ${${(g::)t_cwd}:A} == "${folder:A}" ]] || continue
+      tab=$t_tab pane=$t_pane terminal=$t_term
+      break
+    done <<<$rows
+
+    if [[ -z $tab ]]; then
+      created=$(h $session tab create --workspace $ws --cwd $folder --label shell --no-focus 2>/dev/null) ||
+        open_fail $no_tab
+      tab=$(jq -r '.result.tab.tab_id // empty' <<<$created 2>/dev/null)
+      terminal=$(jq -r '.result.root_pane.terminal_id // empty' <<<$created 2>/dev/null)
+      pane=$(jq -r '.result.root_pane.pane_id // empty' <<<$created 2>/dev/null)
+    fi
+    [[ -n $tab && -n $terminal && -n $pane ]] || open_fail $no_tab
+  fi
+
+  zsystem flock -u $lockfd
+
+  # Focus comes after the unlock: it only changes what is shown, and a second open for
+  # this folder shouldn't wait on it
+  h $session workspace focus $ws >/dev/null 2>&1 || open_fail $no_show
+  h $session tab focus $tab >/dev/null 2>&1 || open_fail $no_show
+
+  if [[ -n ${HERDR_AGENT_ATTACH:-} ]]; then
+    exec ${(Q)${(z)HERDR_AGENT_ATTACH}} $session $terminal $pane
+  fi
+  forget_herdr_pane
+  exec $herdr session attach $session
+}
+
 # Installing herdr-agent itself is rbf/scripts/install-rbf.sh's job, so this only
 # writes cmux's restart entries. It links nothing: run from a checkout, a link would
 # point ~/.local/bin back at the checkout
@@ -831,6 +933,7 @@ case $invoked in
 esac
 
 case ${1:-status} in
+  (open) cmd_open ;;
   (on)
     rm -f -- $state_dir/off
     cmd_status
