@@ -89,7 +89,7 @@ if [[ -o interactive && -n "$HERDR_ENV" && -n "$HERDR_AGENT_LAUNCH" ]]; then
 fi
 ```
 
-And `~/.zshrc`, which sends cmux's claude and codex wrappers and your `pi`, `agy` and
+And `~/.zshrc`, which sends bare `herdr`, cmux's claude and codex wrappers and your `pi`, `agy` and
 `herdr --remote` through the installed links:
 
 ```zsh
@@ -101,10 +101,13 @@ if [[ -x "$herdr_agent_bin/claude" ]]; then
   export CMUX_CUSTOM_CODEX_PATH="$herdr_agent_bin/codex"    # cmux's codex wrapper runs it
   function pi { "$herdr_agent_bin/pi" "$@"; }
   function agy { "$herdr_agent_bin/agy" "$@"; }
-  # `herdr --remote …` in a cmux tab goes through herdr-agent, which notes it so the tab
-  # comes back after a cmux restart; every other herdr call runs as is
+  # bare `herdr` opens this folder's herdr session, in a shell here. `herdr --remote …` in a
+  # cmux tab is noted so the tab comes back after a cmux restart. Both go through
+  # herdr-agent; every other herdr call runs as is
   function herdr {
-    if [[ ${1:-} == --remote && -n ${CMUX_SURFACE_ID:-} ]]; then
+    if (( $# == 0 )); then
+      "${herdr_agent_bin:h:h:h}/bin/herdr-agent" open
+    elif [[ $1 == --remote && -n ${CMUX_SURFACE_ID:-} ]]; then
       "${herdr_agent_bin:h:h:h}/bin/herdr-agent" attach "$@"
     else
       command herdr "$@"
@@ -119,6 +122,28 @@ agents there run in the tab as before.
 A shell reads this once, when it starts, so only tabs opened after the change use the
 installed copy. Tabs already open, and the agents started from them, keep the copy they had
 until they close.
+
+## Bare herdr
+
+In a project folder, bare `herdr` opens this folder's herdr session, in a shell here: the session `herdr-agent session` prints.
+It lands in a tab labelled `shell` at the folder. It takes a `shell` tab back when it has one pane, that pane sits at the folder, and herdr lists no agent in it, and otherwise opens one.
+Another window showing that session's full view moves to the `shell` tab too, and a window showing one agent doesn't.
+
+`command herdr` is plain herdr for one call.
+`herdr-agent off` switches bare `herdr` back to plain herdr.
+`herdr --session default` still opens the old session.
+
+If it cannot open, it prints two lines and exits 1. The first line is one of:
+- `herdr-agent: can't find herdr`
+- `herdr-agent: needs jq (brew install jq)`
+- `herdr-agent: couldn't lock <lock file>`
+- `herdr-agent: herdr's <session> server didn't start (log: <log file>)`
+- `herdr-agent: herdr at <path> can't start a server that survives logout (status <n>: <what it said>). Reinstall the pair with rbf/scripts/install-rbf.sh`
+- `herdr-agent: herdr couldn't open a shell tab in <session>`
+- `herdr-agent: herdr couldn't show the shell tab in <session>`
+
+The second line is always:
+- `herdr-agent: nothing opened. For plain herdr: command herdr`
 
 ## The two notes
 

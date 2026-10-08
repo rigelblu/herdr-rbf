@@ -51,6 +51,7 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - If selected cells change during selection or the pane resizes, the selection clears with a notice: `selection changed · drag again`
 
 ## 🟠⋯ Agents that outlive the terminal (herdr-agent)
+- In a project folder, bare `herdr` opens this folder's herdr session, in a shell here: the session that holds the project's agents, in a tab called `shell`. Type it there again and you get the same shell back. `command herdr` is plain herdr for one call. `herdr-agent off` switches bare `herdr` back to plain herdr. `herdr --session default` still opens the old session
 - Type `claude`, `codex`, `pi` or `agy` in a cmux tab and the agent runs inside this checkout's herdr session, shown in that tab. Closing the tab, or quitting or restarting cmux, doesn't stop it
 - A running session is never removed. Once a session has stopped, after a reboot for example, herdr removes it 3 days after it was last in use — see "Sessions I've stopped using are removed" below
 - `herdr-agent ps` lists what runs, and `herdr-agent attach` shows one in any tab. For a second view, another tab or a phone over SSH, use `herdr session attach <session>`
