@@ -8,6 +8,8 @@
 #   - checks the server and the agent survived, at normal priority
 #   - checks the agent got the exact environment, arguments and herdr variables
 #   - checks the pane closed when the agent exited
+#   - checks bare herdr (herdr-agent open) opens the folder's own session in a shell tab there:
+#     the tab it picks, the ways it fails, and that it writes nothing but a lock
 # With --with-claude it also starts the real claude (no prompt is sent), then
 # resumes its session and checks the launcher attached instead of starting a copy.
 # Run it from a folder Claude already trusts. The session is removed at the end.
@@ -16,6 +18,7 @@
 emulate -R zsh
 setopt extended_glob no_bg_nice
 zmodload zsh/zselect
+zmodload zsh/datetime
 
 here=${0:A:h}
 links=$here/bin
@@ -24,6 +27,7 @@ launcher=${here:h:h}/bin/herdr-agent
 # checkout that's $here; installed, $here is the dated tree the share link points at
 launcher_links=${launcher:h:h}/share/herdr-agent/bin
 herdr=${commands[herdr]:-$HOME/.local/bin/herdr}
+herdr_config=${XDG_CONFIG_HOME:-$HOME/.config}/herdr
 session=herdr-agent-check-$$
 launch_dir=${TMPDIR:-/tmp}/herdr-agent
 work=$(mktemp -d "${TMPDIR:-/tmp}/herdr-agent-check.XXXXXX") || exit 1
@@ -62,6 +66,10 @@ cleanup() {
   h server stop >/dev/null 2>&1
   wait_for 5 server_down
   $herdr session delete $session >/dev/null 2>&1
+  $herdr --session herdr-agent-open-$$ server stop >/dev/null 2>&1
+  $herdr session delete herdr-agent-open-$$ >/dev/null 2>&1
+  rm -rf -- $herdr_config/sessions/herdr-agent-open-$$
+  rm -rf -- $herdr_config/sessions/${session}-none
   rm -rf -- $work
   rm -f -- $launch_dir/$session.*(N)
 }
@@ -91,6 +99,8 @@ EOF
 cat >$work/attach <<'EOF'
 #!/bin/zsh -f
 print -rN -- "$@" >$HERDR_AGENT_CHECK_OUT/attach.$$
+zmodload zsh/datetime
+print -r -- $EPOCHREALTIME >$HERDR_AGENT_CHECK_OUT/attached-at
 sleep 3
 EOF
 
@@ -135,7 +145,9 @@ export HERDR_AGENT=on HERDR_AGENT_SESSION=$session HERDR_AGENT_CHECK_OUT=$work
 export CMUX_PI_CMUX_BIN=$work/fake-cmux
 export HERDR_AGENT_CHECK_LAUNCHER=$launcher
 # the check's own switch and tab notes, under a made-up cmux tab ID
+# (and workspace ID: the pane note reads it back, and an empty one would shift the fields)
 export HERDR_AGENT_STATE_DIR=$work/state CMUX_SURFACE_ID=C0FFEE00-0000-4000-8000-00000000000C
+export CMUX_WORKSPACE_ID=C0FFEE00-0000-4000-8000-00000000000D
 export HERDR_AGENT_CHECK_AGENT=$work/agent HERDR_AGENT_ATTACH=$work/attach
 export HERDR_AGENT_CHECK_JSON='{"hooks":{"Stop":[{"command":"\"${X:-cmux}\" hooks"}]},"q":"it'\''s"}'
 export HERDR_AGENT_CHECK_LINES=$'line one\nline two'
@@ -504,7 +516,7 @@ first_pane=${attach_args[3]}
 # the note the agent's hooks read, written by the attach that showed this pane
 pane_note=$work/state/panes/$session.$first_pane
 if [[ -f $pane_note ]] && IFS=$'\t' read -r note_tab note_ws note_pid <$pane_note &&
-  [[ $note_tab == "$CMUX_SURFACE_ID" && $note_pid == "$launcher_pid" ]]; then
+  [[ $note_tab == "$CMUX_SURFACE_ID" && $note_ws == "$CMUX_WORKSPACE_ID" && $note_pid == "$launcher_pid" ]]; then
   pass "the launcher noted which tab shows this pane, for the agent's hooks"
 else
   fail "the pane note is missing or wrong: $(tr '\t' '|' <$pane_note 2>&1)"
@@ -710,6 +722,875 @@ else
   else
     fail "claude never reported its session; run the check from a folder Claude already trusts"
   fi
+fi
+
+# 6. bare herdr opens in the folder it was run from (herdr-agent open)
+# `script` stops when its input is a socket, as it can be when the check runs from a tool
+exec </dev/null
+# A state folder of its own for all of this section, so scenario 21 can see everything open wrote
+export HERDR_AGENT_STATE_DIR=$work/state6
+s21_launch_before=($launch_dir/$session.*(N))
+mkdir -p -- $work/proj/.git $work/proj/sub $work/proj/sub2 $work/proj/sub3 $work/proj/sub4
+mkdir -p -- $work/other/.git
+mkdir -p -- $work/stub
+cat >$work/stub/herdr <<EOF
+#!/bin/zsh -f
+print -r -- \$# >\$HERDR_AGENT_CHECK_OUT/plain.args
+exit 0
+EOF
+chmod +x $work/stub/herdr
+
+chose_tab() {
+  local target_ws=$1 target_tab=$2 target_pane=$3
+  local -a rec=($work/attach.*(N))
+  (( $#rec > 0 )) || return 1
+  split_nul cur_rec_args $rec[-1]
+  [[ ${cur_rec_args[3]} == "$target_pane" ]] || return 1
+  local cur_tab_focus cur_ws_focus
+  cur_tab_focus=$($herdr --session $session tab list --workspace $target_ws 2>/dev/null |
+    jq -r '[.result.tabs[]? | select(.focused == true) | .tab_id] | if length == 1 then .[0] else empty end')
+  [[ $cur_tab_focus == "$target_tab" ]] || return 1
+  cur_ws_focus=$($herdr --session $session workspace list 2>/dev/null |
+    jq -r '[.result.workspaces[]? | select(.focused == true) | .workspace_id] | if length == 1 then .[0] else empty end')
+  [[ $cur_ws_focus == "$target_ws" ]] || return 1
+  return 0
+}
+
+# the tabs of workspace $1; the first tab of $1 that isn't among the ids that follow; a tab's label;
+# the first pane of a tab; the folder of that pane
+tabs_of() { h tab list --workspace $1 2>/dev/null | jq -r '.result.tabs[]?.tab_id' }
+new_tab() {
+  local ws=$1 tid
+  shift
+  for tid in $(tabs_of $ws); do
+    (( ${@[(Ie)$tid]} )) || { print -r -- $tid; return 0 }
+  done
+  return 1
+}
+tab_label() { h tab list --workspace $1 2>/dev/null | jq -r --arg t "$2" '.result.tabs[]? | select(.tab_id == $t) | .label' }
+pane_in_tab() { h pane list 2>/dev/null | jq -r --arg t "$1" 'first(.result.panes[]? | select(.tab_id == $t) | .pane_id) // empty' }
+pane_cwd_in_tab() { h pane list 2>/dev/null | jq -r --arg t "$1" 'first(.result.panes[]? | select(.tab_id == $t) | .cwd) // empty' }
+# how many workspaces, and how many tabs labelled shell, the throwaway session holds
+open_counts() {
+  local ws w n=0
+  local -a wss
+  wss=(${(f)"$(h workspace list 2>/dev/null | jq -r '.result.workspaces[]?.workspace_id')"})
+  for w in $wss; do
+    n=$(( n + $(h tab list --workspace $w 2>/dev/null | jq '[.result.tabs[]? | select(.label == "shell")] | length') ))
+  done
+  print -r -- "$#wss $n"
+}
+# what a typescript holds, less the ^D echo, backspaces and carriage returns, into $typed_text.
+# Its newlines are kept (a $(…) would drop the trailing ones, and with them a blank line)
+typed() {
+  typed_text=$(tr -d '\r\010' <$1; print -n x)
+  typed_text=${typed_text%x}
+  typed_text=${typed_text//'^D'/}
+}
+# stand-in herdr in $work/stub-$1: a call with the words $2 side by side does $3 (default: fail), and
+# every other call goes to the real herdr; a call with no arguments is noted
+stub_herdr() {
+  mkdir -p -- $work/stub-$1
+  {
+    print -r -- '#!/bin/zsh -f'
+    print -r -- "(( \$# )) || print -r -- called >>${(q)work}/noargs.calls"
+    [[ -n ${2:-} ]] && print -r -- "[[ \" \$* \" == *\" $2 \"* ]] && { ${3:-exit 1} }"
+    print -r -- "exec ${(q)herdr} \"\$@\""
+  } >$work/stub-$1/herdr
+  chmod +x $work/stub-$1/herdr
+}
+
+# Scenario 1: first time in a folder
+h server stop >/dev/null 2>&1
+wait_for 5 server_down
+$herdr session delete $session >/dev/null 2>&1
+rm -f -- $work/attach.*(N)
+
+rm -f -- $work/attached-at
+s1_start=$EPOCHREALTIME
+( cd $work/proj && /usr/bin/script -q $work/s1.out $launcher open >/dev/null )
+# the attach step stamps its start, so the 13 seconds are open's, not the viewer's
+s1_took=99
+[[ -f $work/attached-at ]] && s1_took=$(( $(<$work/attached-at) - s1_start ))
+
+ws_proj=$(h workspace list 2>/dev/null | jq -r 'if (.result.workspaces | length == 1) and (.result.workspaces[0].label == "proj") then .result.workspaces[0].workspace_id else empty end')
+tab_shell=$(h tab list --workspace $ws_proj 2>/dev/null | jq -r 'if (.result.tabs | length == 1) and (.result.tabs[0].label == "shell") then .result.tabs[0].tab_id else empty end')
+pane_row=$(h pane list 2>/dev/null | jq -r --arg t "$tab_shell" '.result.panes[]? | select(.tab_id == $t) | [.pane_id, .cwd] | @tsv')
+pane_id=${${=pane_row}[1]}
+pane_cwd=${${=pane_row}[2]}
+
+if [[ -n $ws_proj && -n $tab_shell && -n $pane_id ]] &&
+   [[ ${pane_cwd:A} == "${${:-$work/proj}:A}" ]] && (( s1_took >= 0 && s1_took < 13 )) &&
+   chose_tab $ws_proj $tab_shell $pane_id; then
+  pass "open started the session, made one workspace, proj, with one tab, shell, at the folder, and chose it"
+else
+  fail "first time in folder open failed: ws=$ws_proj tab=$tab_shell pane=$pane_id cwd=$pane_cwd took=${s1_took}s"
+fi
+
+# Scenario 2: coming back reuses the shell
+rm -f -- $work/attach.*(N)
+( cd $work/proj && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+s2_tab_count=$(h tab list --workspace $ws_proj 2>/dev/null | jq -r '.result.tabs | length')
+if (( s2_tab_count == 1 )) && chose_tab $ws_proj $tab_shell $pane_id; then
+  pass "a second open chose the same shell tab: same pane, still one tab"
+else
+  fail "second open failed: tabs=$s2_tab_count"
+fi
+
+# Scenario 3: tabs with agent labels at the same folder aren't the shell
+h tab create --workspace $ws_proj --cwd $work/proj --label claude --focus >/dev/null 2>&1
+h tab create --workspace $ws_proj --cwd $work/proj --label codex --focus >/dev/null 2>&1
+rm -f -- $work/attach.*(N)
+( cd $work/proj && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+s3_labels=$(h tab list --workspace $ws_proj 2>/dev/null | jq -r '[.result.tabs[].label] | join(",")')
+if [[ $s3_labels == "shell,claude,codex" ]] && chose_tab $ws_proj $tab_shell $pane_id; then
+  pass "two agent-labelled tabs at the folder were left alone and the shell tab was chosen"
+else
+  fail "agent tabs at folder failed: labels=$s3_labels"
+fi
+
+# Scenario 4: a workspace that holds only an agent tab
+ws_other_res=$(h workspace create --cwd $work/other --label other --no-focus 2>/dev/null)
+ws_other=$(jq -r '.result.workspace.workspace_id' <<<$ws_other_res)
+tab_claude_other=$(jq -r '.result.tab.tab_id' <<<$ws_other_res)
+h tab rename $tab_claude_other claude >/dev/null 2>&1
+
+rm -f -- $work/attach.*(N)
+( cd $work/other && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+s4_labels_1=$(h tab list --workspace $ws_other 2>/dev/null | jq -r '[.result.tabs[].label] | join(",")')
+tab_shell_other=$(h tab list --workspace $ws_other 2>/dev/null | jq -r '.result.tabs[1].tab_id')
+pane_shell_other=$(h pane list 2>/dev/null | jq -r --arg t "$tab_shell_other" '.result.panes[]? | select(.tab_id == $t) | .pane_id')
+
+if [[ $s4_labels_1 == "claude,shell" ]] && chose_tab $ws_other $tab_shell_other $pane_shell_other; then
+  pass "in a workspace holding only an agent tab, open added a shell tab and chose it"
+else
+  fail "workspace with only agent tab failed: labels=$s4_labels_1"
+fi
+
+h tab focus $tab_claude_other >/dev/null 2>&1
+rm -f -- $work/attach.*(N)
+( cd $work/other && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+s4_labels_2=$(h tab list --workspace $ws_other 2>/dev/null | jq -r '[.result.tabs[].label] | join(",")')
+if [[ $s4_labels_2 == "claude,shell" ]] && chose_tab $ws_other $tab_shell_other $pane_shell_other; then
+  pass "with an agent-labelled tab ahead of it at the same folder, a second open chose the shell tab"
+else
+  fail "second open with agent tab ahead failed: labels=$s4_labels_2"
+fi
+
+# Scenario 5: he can type in that shell, from wherever the focus was
+# The guard stands in for herdr on this run's PATH and refuses a call that isn't aimed at the
+# throwaway session: the launcher's calls, and its final `session attach`
+mkdir -p -- $work/stub-guard
+cat >$work/stub-guard/herdr <<EOF
+#!/bin/zsh -f
+zmodload zsh/datetime
+[[ "\$*" == "session attach $session" ]] && print -r -- \$EPOCHREALTIME >${(q)work}/attach-at
+[[ "\$*" == *"--session $session "* || "\$*" == "session attach $session" ]] ||
+  { print -r -- "\$*" >>${(q)work}/guard.refused; exit 1 }
+exec ${(q)herdr} "\$@"
+EOF
+chmod +x $work/stub-guard/herdr
+h workspace focus $ws_other >/dev/null 2>&1
+h tab focus $tab_claude_other >/dev/null 2>&1
+rm -f -- $work/landed $work/tty-open.log $work/guard.refused $work/attach-at $work/key-sent
+# The keys come from a coprocess that stays open until we stop the client, so no end-of-file
+# reaches the shell in the pane; backgrounded on its own, `script` is $!
+coproc { sleep 3; print -r -- $EPOCHREALTIME >| ${(q)work}/key-sent; print -r -- "pwd >| ${(q)work}/landed"; exec sleep 30 }
+s5_keys=$!
+PATH=$work/stub-guard:$PATH HERDR_AGENT_ATTACH= /usr/bin/script -q $work/tty-open.log /bin/zsh -fc 'cd "$1"; stty rows 40 cols 120; shift; exec "$@"' sized $work/proj $launcher open <&p >/dev/null &
+s5_pid=$!
+wait_for 10 test -f $work/key-sent
+wait_for 10 test -f $work/landed
+s5_seen=$EPOCHREALTIME
+# stop the client (and `script`) before the keys end, then the keys
+# by parent, not by pattern: the client is `script`'s own child (open and the launcher exec into it),
+# and a pattern on the session name would also hit another check's client
+s5_clients=($(/usr/bin/pgrep -P $s5_pid))
+s5_cmd=$(/bin/ps -o command= -p ${s5_clients[1]:-0} 2>/dev/null)
+kill $s5_clients $s5_pid >/dev/null 2>&1
+wait_for 5 gone $s5_pid
+s5_left=0
+for s5_client in $s5_clients; do wait_for 5 gone $s5_client || s5_left=1; done
+kill $s5_keys >/dev/null 2>&1
+wait $s5_pid $s5_keys 2>/dev/null
+
+landed_content=
+[[ -f $work/landed ]] && landed_content=$(<$work/landed)
+# The viewer must be attached before the key is sent (so the key isn't queued in the terminal and
+# handed over late), and the key must land within a second of being sent
+s5_sent=999 s5_attached=999
+[[ -f $work/key-sent ]] && s5_sent=$(<$work/key-sent)
+[[ -f $work/attach-at ]] && s5_attached=$(<$work/attach-at)
+s5_lag=$(( s5_seen - s5_sent ))
+if [[ -n $landed_content && ${landed_content:A} == "${${:-$work/proj}:A}" ]] &&
+   [[ ! -e $work/guard.refused ]] && (( $#s5_clients == 1 && s5_left == 0 )) && [[ $s5_cmd == *" session attach $session" ]] &&
+   (( s5_attached < s5_sent && s5_lag >= 0 && s5_lag < 1 )) &&
+   /usr/bin/perl -0777 -ne 'exit(/\A\e\[/ ? 0 : 1)' $work/tty-open.log; then
+  pass "with the focus on another workspace's agent tab, a key sent 3 s after bare herdr, with the viewer already attached, went to the shell at the folder within 1 s"
+else
+  fail "key after bare herdr failed: landed='$landed_content' attached=$s5_attached sent=$s5_sent lag=$s5_lag clients=$#s5_clients cmd='$s5_cmd' left=$s5_left refused='$(cat $work/guard.refused 2>/dev/null)' first bytes: $(head -c 80 $work/tty-open.log 2>/dev/null | od -c | head -2)"
+fi
+
+# Scenario 6: a subfolder
+rm -f -- $work/attach.*(N) $work/envmark
+s6_tabs_before=($(tabs_of $ws_proj))
+( cd $work/proj/sub && HERDR_AGENT_CHECK_EXPORTED=here /usr/bin/script -q $work/s6.out $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+tab_shell_sub=$(new_tab $ws_proj $s6_tabs_before)
+pane_shell_sub=$(pane_in_tab $tab_shell_sub)
+s6_label=$(tab_label $ws_proj $tab_shell_sub)
+s6_cwd=$(pane_cwd_in_tab $tab_shell_sub)
+if [[ -n $tab_shell_sub && -n $pane_shell_sub && $s6_label == shell && -n $s6_cwd && ${s6_cwd:A} == "${${:-$work/proj/sub}:A}" ]] &&
+   chose_tab $ws_proj $tab_shell_sub $pane_shell_sub; then
+  pass "from a subfolder, open added a second shell tab in the same workspace, at the subfolder, and chose it"
+else
+  fail "subfolder open failed: tab=$tab_shell_sub label=$s6_label pane=$pane_shell_sub cwd=$s6_cwd"
+fi
+
+h pane run $pane_shell_sub 'print -r -- ${HERDR_AGENT_CHECK_EXPORTED:-absent} >| '${(q)work}/envmark >/dev/null 2>&1
+wait_for 5 test -f $work/envmark
+if [[ -f $work/envmark && $(<$work/envmark) == "absent" ]]; then
+  pass "a variable exported in the terminal is absent in the new shell tab"
+else
+  fail "exported variable check failed: got '$(cat $work/envmark 2>/dev/null)'"
+fi
+
+# Nothing is printed before the attach step, whether open made a workspace (scenario 1) or a tab (6)
+typed $work/s1.out
+s6_typed_ws=$typed_text
+typed $work/s6.out
+s6_typed_tab=$typed_text
+if [[ -z $s6_typed_ws && -z $s6_typed_tab ]]; then
+  pass "open printed nothing of its own, making a workspace and making a tab"
+else
+  fail "open printed something before the attach step: workspace run '$s6_typed_ws', tab run '$s6_typed_tab'"
+fi
+
+# Scenario 7: he moved the shell
+pane_at() { local cwd=$(h pane list 2>/dev/null | jq -r --arg p $1 '.result.panes[]? | select(.pane_id == $p) | .cwd'); [[ -n $cwd && ${cwd:A} == "${2:A}" ]] }
+h pane run $pane_id "cd ${(q)work}/proj/sub2" >/dev/null 2>&1
+wait_for 10 pane_at $pane_id $work/proj/sub2
+
+rm -f -- $work/attach.*(N)
+s7_tabs_before=($(tabs_of $ws_proj))
+( cd $work/proj && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+new_shell_proj_tab=$(new_tab $ws_proj $s7_tabs_before)
+new_shell_proj_pane=$(pane_in_tab $new_shell_proj_tab)
+
+if [[ -n $new_shell_proj_tab && $new_shell_proj_pane != "$pane_id" ]] &&
+   chose_tab $ws_proj $new_shell_proj_tab $new_shell_proj_pane; then
+  pass "after the shell moved away, open made a new shell tab at the folder and chose it"
+else
+  fail "moved shell new tab failed: tab=$new_shell_proj_tab pane=$new_shell_proj_pane orig=$pane_id"
+fi
+
+rm -f -- $work/attach.*(N)
+( cd $work/proj/sub2 && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+if chose_tab $ws_proj $tab_shell $pane_id; then
+  pass "the moved shell is the shell for the folder it sits in now"
+else
+  fail "moved shell reuse failed: orig_tab=$tab_shell orig_pane=$pane_id"
+fi
+
+# Scenario 8: he split the shell tab
+h pane split $pane_shell_sub --direction right --no-focus >/dev/null 2>&1
+rm -f -- $work/attach.*(N)
+s8_tabs_before=($(tabs_of $ws_proj))
+( cd $work/proj/sub && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+new_sub_tab=$(new_tab $ws_proj $s8_tabs_before)
+new_sub_pane=$(pane_in_tab $new_sub_tab)
+split_pane_count=$(h tab list --workspace $ws_proj 2>/dev/null | jq -r --arg t "$tab_shell_sub" '.result.tabs[]? | select(.tab_id == $t) | .pane_count')
+
+if (( split_pane_count > 1 )) && [[ -n $new_sub_tab && $new_sub_tab != "$tab_shell_sub" ]] &&
+   chose_tab $ws_proj $new_sub_tab $new_sub_pane; then
+  pass "a split shell tab was left alone and a new one-pane shell tab was chosen"
+else
+  fail "split shell tab failed: split_count=$split_pane_count new_tab=$new_sub_tab old_tab=$tab_shell_sub"
+fi
+
+# Scenario 9: a stopped session comes back, and the shell with it
+s9_tabs_before=$(tab_total)
+h server stop >/dev/null 2>&1
+wait_for 5 server_down
+
+rm -f -- $work/attach.*(N)
+( cd $work/proj && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 13 attaches 1
+
+s9_tabs_after=$(tab_total)
+if [[ $s9_tabs_after == "$s9_tabs_before" ]] &&
+   chose_tab $ws_proj $new_shell_proj_tab $new_shell_proj_pane; then
+  pass "a stopped session came back with its tabs, and open chose the shell tab at the folder"
+else
+  fail "stopped session restore failed: before=$s9_tabs_before after=$s9_tabs_after"
+fi
+
+# Scenario 10: two at once
+h server stop >/dev/null 2>&1
+wait_for 5 server_down
+$herdr session delete $session >/dev/null 2>&1
+rm -f -- $work/attach.*(N)
+
+# Agent launches write notes (tabs, panes) beside the locks: their own folder, sharing the locks, so
+# scenario 21 sees only what open wrote
+agent_state=$work/state-agent
+mkdir -p -- $HERDR_AGENT_STATE_DIR/locks $agent_state
+ln -s $HERDR_AGENT_STATE_DIR/locks $agent_state/locks
+# from a subfolder, so the workspace the first one makes starts its tab there
+( cd $work/proj/sub && /usr/bin/script -q /dev/null $launcher open >/dev/null ) &
+( cd $work/proj/sub && /usr/bin/script -q /dev/null $launcher open >/dev/null ) &
+wait_for 20 attaches 2
+
+s10_rec=($work/attach.*(N))
+split_nul s10_a1 $s10_rec[1]
+split_nul s10_a2 $s10_rec[2]
+s10_ws_count=$(h workspace list 2>/dev/null | jq -r '[.result.workspaces[] | select(.label == "proj")] | length')
+s10_tab_count=$(h tab list --workspace $(h workspace list 2>/dev/null | jq -r '.result.workspaces[0].workspace_id') 2>/dev/null | jq -r '[.result.tabs[] | select(.label == "shell")] | length')
+
+s10_ws1_id=$(h workspace list 2>/dev/null | jq -r 'first(.result.workspaces[] | select(.label == "proj") | .workspace_id) // empty')
+s10_shell1=$(h tab list --workspace $s10_ws1_id 2>/dev/null | jq -r 'first(.result.tabs[] | select(.label == "shell") | .tab_id) // empty')
+s10_cwd1=$(pane_cwd_in_tab $s10_shell1)
+
+if [[ ${s10_a1[3]} == "${s10_a2[3]}" ]] && (( s10_ws_count == 1 && s10_tab_count == 1 )) &&
+   [[ -n $s10_cwd1 && ${s10_cwd1:A} == "${${:-$work/proj/sub}:A}" ]]; then
+  pass "two opens at once, from a subfolder, ended with one server, one workspace and one shell tab, at the subfolder"
+else
+  fail "two opens at once failed: panes=${s10_a1[3]},${s10_a2[3]} ws=$s10_ws_count tabs=$s10_tab_count cwd=$s10_cwd1"
+fi
+
+h server stop >/dev/null 2>&1
+wait_for 5 server_down
+$herdr session delete $session >/dev/null 2>&1
+rm -f -- $work/attach.*(N)
+
+( cd $work/proj && /usr/bin/script -q /dev/null $launcher open >/dev/null ) &
+( cd $work/proj && HERDR_AGENT_STATE_DIR=$agent_state HERDR_AGENT_CHECK_AGENT=$work/agent /usr/bin/script -q /dev/null $links/pi >/dev/null ) &
+wait_for 20 attaches 2
+
+s10_rec2=($work/attach.*(N))
+split_nul s10_b1 $s10_rec2[1]
+split_nul s10_b2 $s10_rec2[2]
+s10_ws2_id=$(h workspace list 2>/dev/null | jq -r 'first(.result.workspaces[] | select(.label == "proj") | .workspace_id) // empty')
+s10_labels=$(h tab list --workspace $s10_ws2_id 2>/dev/null | jq -r '[.result.tabs[].label] | sort | join(",")')
+
+if [[ ${s10_b1[3]} != "${s10_b2[3]}" ]] && [[ $s10_labels == "pi,shell" ]]; then
+  pass "an open and an agent launch at once ended with one server, one workspace, one shell tab and one agent tab"
+else
+  fail "open and agent at once failed: panes=${s10_b1[3]},${s10_b2[3]} labels=$s10_labels"
+fi
+
+# Scenario 11: an agent launched from a terminal in the same folder joins the shell's workspace
+# (scenario 10's pi stand-in may close at any moment, so find the new tab by its id)
+s11_tabs_before=($(tabs_of $s10_ws2_id))
+rm -f -- $work/attach.*(N)
+( cd $work/proj && HERDR_AGENT_STATE_DIR=$agent_state HERDR_AGENT_CHECK_AGENT=$work/agent /usr/bin/script -q /dev/null $links/pi >/dev/null )
+wait_for 10 attaches 1
+
+s11_ws_count=$(h workspace list 2>/dev/null | jq -r '[.result.workspaces[] | select(.label == "proj")] | length')
+s11_tab=$(new_tab $s10_ws2_id $s11_tabs_before)
+s11_label=$(tab_label $s10_ws2_id $s11_tab)
+
+if (( s11_ws_count == 1 )) && [[ -n $s11_tab && $s11_label == pi ]]; then
+  pass "an agent launched from the same folder joined the shell's workspace"
+else
+  fail "agent launch did not join workspace: count=$s11_ws_count new tab='$s11_tab' labelled '$s11_label'"
+fi
+
+# Scenario 12: switched off, it's plain herdr
+rm -f -- $work/plain.args
+s12_tabs_before=$(tab_total)
+( cd $work/proj/sub3 && PATH=$work/stub:$PATH HERDR_AGENT=off /usr/bin/script -q /dev/null $launcher open >/dev/null )
+if [[ -f $work/plain.args && $(<$work/plain.args) == "0" && $(tab_total) == "$s12_tabs_before" ]]; then
+  pass "switched off, open ran plain herdr with no arguments and made nothing"
+else
+  fail "switched off open failed: args=$(cat $work/plain.args 2>/dev/null) tabs=$(tab_total) vs $s12_tabs_before"
+fi
+
+# Scenario 13: with no terminal, it's plain herdr
+rm -f -- $work/plain.args
+s13_counts=$(open_counts)
+( cd $work/proj/sub3 && PATH=$work/stub:$PATH HERDR_AGENT=on $launcher open </dev/null >$work/notty.out 2>&1 )
+if [[ -f $work/plain.args && $(<$work/plain.args) == "0" && $(open_counts) == "$s13_counts" ]]; then
+  pass "with no terminal, open ran plain herdr with no arguments and made nothing"
+else
+  fail "no terminal open failed: args=$(cat $work/plain.args 2>/dev/null) counts: $s13_counts before, $(open_counts) after"
+fi
+
+# Scenario 14: inside a herdr pane, it's plain herdr
+rm -f -- $work/plain.args
+s14_tab=$(h tab list --workspace $s10_ws2_id 2>/dev/null | jq -r 'first(.result.tabs[] | select(.label == "shell") | .tab_id) // empty')
+s14_pane=$(h pane list 2>/dev/null | jq -r --arg t "$s14_tab" 'first(.result.panes[]? | select(.tab_id == $t) | .pane_id) // empty')
+h pane run $s14_pane "PATH=${(q)work}/stub:\$PATH HERDR_AGENT=on HERDR_AGENT_CHECK_OUT=${(q)work} HERDR_AGENT_SESSION=$session HERDR_AGENT_STATE_DIR=${(q)HERDR_AGENT_STATE_DIR} ${(q)launcher} open" >/dev/null 2>&1
+wait_for 10 test -f $work/plain.args
+if [[ -f $work/plain.args && $(<$work/plain.args) == "0" ]]; then
+  pass "inside a herdr pane, open ran plain herdr with no arguments and made nothing"
+else
+  fail "inside herdr pane open failed: args=$(cat $work/plain.args 2>/dev/null)"
+fi
+
+# Scenario 14b: an agent launched from a subfolder joins the checkout's workspace, not one named for the subfolder
+s14b_tabs_before=($(tabs_of $s10_ws2_id))
+rm -f -- $work/attach.*(N)
+( cd $work/proj/sub3 && HERDR_AGENT_STATE_DIR=$agent_state HERDR_AGENT_CHECK_AGENT=$work/agent /usr/bin/script -q /dev/null $links/pi >/dev/null )
+wait_for 10 attaches 1
+
+s14b_sub=$(h workspace list 2>/dev/null | jq -r 'first(.result.workspaces[] | select(.label == "sub3") | .workspace_id) // empty')
+s14b_tab=$(new_tab $s10_ws2_id $s14b_tabs_before)
+if [[ -z $s14b_sub && -n $s14b_tab && $(tab_label $s10_ws2_id $s14b_tab) == pi ]]; then
+  pass "an agent launched from a subfolder joined the workspace named for the checkout"
+else
+  fail "subfolder agent launch failed: subfolder workspace='$s14b_sub' new tab='$s14b_tab'"
+fi
+
+no_attaches() { local -a _a=($work/attach.*(N)); (( $#_a == 0 )) }
+# Did open stop the way scenario 15 says? $1 is the typescript, $2 the exit status, $3 the reason
+# line: nothing but that and the closing line may be printed, with exit status 1, no attach, and
+# herdr never run bare (the stubs note a call with no arguments)
+stopped_with() {
+  local text
+  typed $1
+  [[ $2 == 1 && $typed_text == "$3"$'\nherdr-agent: nothing opened. For plain herdr: command herdr\n' ]] &&
+    no_attaches && [[ ! -e $work/noargs.calls ]]
+}
+# a stub that notes a bare call and then passes every call to the real herdr
+stub_herdr rec
+
+# Scenario 15: every failure stops it, each with its own line
+# 15.1 capability
+mkdir -p -- $work/stub-cap
+cat >$work/stub-cap/herdr <<EOF
+#!/bin/zsh -f
+(( \$# )) || print -r -- called >>${(q)work}/noargs.calls
+if [[ \$1 == --capability && \$2 == macos-strict-user-context ]]; then
+  print -r -- no
+  exit 1
+fi
+exit 1
+EOF
+chmod +x $work/stub-cap/herdr
+
+rm -f -- $work/attach.*(N) $work/fail-cap.out $work/noargs.calls
+( cd $work/proj && PATH=$work/stub-cap:$PATH HERDR_AGENT_SESSION=${session}-none /usr/bin/script -q $work/fail-cap.out $launcher open >/dev/null )
+if stopped_with $work/fail-cap.out $? "herdr-agent: herdr at $work/stub-cap/herdr can't start a server that survives logout (status 1: no). Reinstall the pair with rbf/scripts/install-rbf.sh"; then
+  pass "a herdr that can't keep a server across logout stops open, in open's own words"
+else
+  fail "capability failure output mismatch: $(cat $work/fail-cap.out)"
+fi
+
+# 15.2 no herdr
+mkdir -p -- $work/nohome
+rm -f -- $work/attach.*(N) $work/fail-noherdr.out $work/noargs.calls
+( cd $work/proj && PATH=/usr/bin:/bin HOME=$work/nohome /usr/bin/script -q $work/fail-noherdr.out $launcher open >/dev/null )
+if stopped_with $work/fail-noherdr.out $? "herdr-agent: can't find herdr"; then
+  pass "no herdr on the machine stops open"
+else
+  fail "no herdr output mismatch: $(cat $work/fail-noherdr.out)"
+fi
+
+# 15.3 no jq
+mkdir -p -- $work/onlyherdr
+cp -f -- $work/stub-rec/herdr $work/onlyherdr/herdr
+rm -f -- $work/attach.*(N) $work/fail-nojq.out $work/noargs.calls
+( cd $work/proj && PATH=$work/onlyherdr /usr/bin/script -q $work/fail-nojq.out $launcher open >/dev/null )
+if stopped_with $work/fail-nojq.out $? "herdr-agent: needs jq (brew install jq)"; then
+  pass "no jq stops open"
+else
+  fail "no jq output mismatch: $(cat $work/fail-nojq.out)"
+fi
+
+# 15.4 lock: the state folder's locks is a file, then a folder that can't be written to
+mkdir -p -- $work/badstate $work/badstate2/locks
+: >| $work/badstate/locks
+chmod 555 $work/badstate2/locks
+rm -f -- $work/attach.*(N) $work/fail-lock.out $work/fail-lock2.out $work/noargs.calls
+( cd $work/proj && PATH=$work/stub-rec:$PATH HERDR_AGENT_STATE_DIR=$work/badstate /usr/bin/script -q $work/fail-lock.out $launcher open >/dev/null )
+s15_lock_file=$?
+( cd $work/proj && PATH=$work/stub-rec:$PATH HERDR_AGENT_STATE_DIR=$work/badstate2 /usr/bin/script -q $work/fail-lock2.out $launcher open >/dev/null )
+s15_lock_ro=$?
+if stopped_with $work/fail-lock.out $s15_lock_file "herdr-agent: couldn't lock $work/badstate/locks/$session.lock"; then
+  pass "a lock that can't be taken stops open"
+else
+  fail "lock failure output mismatch: $(cat $work/fail-lock.out)"
+fi
+if stopped_with $work/fail-lock2.out $s15_lock_ro "herdr-agent: couldn't lock $work/badstate2/locks/$session.lock"; then
+  pass "a lock in a folder that can't be written to stops open"
+else
+  fail "unwritable lock folder output mismatch: $(cat $work/fail-lock2.out)"
+fi
+
+# 15.4b a lock file that can be written to but not opened for locking
+mkdir -p -- $work/badstate3/locks
+: >| $work/badstate3/locks/$session.lock
+chmod 200 $work/badstate3/locks/$session.lock
+rm -f -- $work/attach.*(N) $work/fail-lock3.out $work/noargs.calls
+( cd $work/proj && PATH=$work/stub-rec:$PATH HERDR_AGENT_STATE_DIR=$work/badstate3 /usr/bin/script -q $work/fail-lock3.out $launcher open >/dev/null )
+s15_lock_wo=$?
+if stopped_with $work/fail-lock3.out $s15_lock_wo "herdr-agent: couldn't lock $work/badstate3/locks/$session.lock"; then
+  pass "a lock file that can't be opened for locking stops open with the lock reason and nothing more"
+else
+  fail "unopenable lock output mismatch: $(cat $work/fail-lock3.out)"
+fi
+
+# 15.5 server won't start
+mkdir -p -- $work/stub-noserver
+cat >$work/stub-noserver/herdr <<EOF
+#!/bin/zsh -f
+(( \$# )) || print -r -- called >>${(q)work}/noargs.calls
+if [[ \$1 == --capability && \$2 == macos-strict-user-context ]]; then
+  print -r -- macos-strict-user-context
+  exit 0
+fi
+exit 1
+EOF
+chmod +x $work/stub-noserver/herdr
+
+rm -f -- $work/attach.*(N) $work/fail-noserver.out $work/noargs.calls
+( cd $work/proj && PATH=$work/stub-noserver:$PATH HERDR_AGENT_SESSION=${session}-none /usr/bin/script -q $work/fail-noserver.out $launcher open >/dev/null )
+if stopped_with $work/fail-noserver.out $? "herdr-agent: herdr's ${session}-none server didn't start (log: $herdr_config/sessions/${session}-none/herdr-agent-server.log)"; then
+  pass "a server that won't start stops open"
+else
+  fail "server start failure output mismatch: $(cat $work/fail-noserver.out)"
+fi
+rm -rf -- $herdr_config/sessions/${session}-none
+
+# 15.6 tab create fails
+stub_herdr notab 'tab create'
+
+rm -f -- $work/attach.*(N) $work/fail-notab.out $work/noargs.calls
+( cd $work/proj/sub3 && PATH=$work/stub-notab:$PATH /usr/bin/script -q $work/fail-notab.out $launcher open >/dev/null )
+if stopped_with $work/fail-notab.out $? "herdr-agent: herdr couldn't open a shell tab in $session"; then
+  pass "a tab that can't be made stops open"
+else
+  fail "tab create failure output mismatch: $(cat $work/fail-notab.out)"
+fi
+
+# 15.7 workspace focus fails
+stub_herdr nowsfocus 'workspace focus'
+
+rm -f -- $work/attach.*(N) $work/fail-nowsfocus.out $work/noargs.calls
+( cd $work/proj && PATH=$work/stub-nowsfocus:$PATH /usr/bin/script -q $work/fail-nowsfocus.out $launcher open >/dev/null )
+if stopped_with $work/fail-nowsfocus.out $? "herdr-agent: herdr couldn't show the shell tab in $session"; then
+  pass "a workspace focus that fails stops open, and nothing attaches"
+else
+  fail "workspace focus failure output mismatch: $(cat $work/fail-nowsfocus.out)"
+fi
+
+# 15.8 tab focus fails
+stub_herdr notabfocus 'tab focus'
+
+rm -f -- $work/attach.*(N) $work/fail-notabfocus.out $work/noargs.calls
+( cd $work/proj && PATH=$work/stub-notabfocus:$PATH /usr/bin/script -q $work/fail-notabfocus.out $launcher open >/dev/null )
+if stopped_with $work/fail-notabfocus.out $? "herdr-agent: herdr couldn't show the shell tab in $session"; then
+  pass "a tab focus that fails stops open, and nothing attaches"
+else
+  fail "tab focus failure output mismatch: $(cat $work/fail-notabfocus.out)"
+fi
+
+# 15.9 the session's folder can't be made: herdr's sessions folder is a plain file
+mkdir -p -- $work/badcfg/herdr
+: >| $work/badcfg/herdr/sessions
+rm -f -- $work/attach.*(N) $work/fail-nodir.out $work/noargs.calls
+( cd $work/proj && PATH=$work/stub-noserver:$PATH XDG_CONFIG_HOME=$work/badcfg HERDR_AGENT_SESSION=${session}-none /usr/bin/script -q $work/fail-nodir.out $launcher open >/dev/null )
+if stopped_with $work/fail-nodir.out $? "herdr-agent: herdr's ${session}-none server didn't start (log: $work/badcfg/herdr/sessions/${session}-none/herdr-agent-server.log)"; then
+  pass "a session folder that can't be made stops open with its two lines"
+else
+  fail "session folder failure output mismatch: $(cat $work/fail-nodir.out)"
+fi
+
+# 15.9b the session's folder is there but its log can't be opened, and open says so at once
+mkdir -p -- $work/badcfg2/herdr/sessions/${session}-none
+chmod 555 $work/badcfg2/herdr/sessions/${session}-none
+rm -f -- $work/attach.*(N) $work/fail-nolog.out $work/noargs.calls
+s15_nolog_start=$EPOCHREALTIME
+( cd $work/proj && PATH=$work/stub-noserver:$PATH XDG_CONFIG_HOME=$work/badcfg2 HERDR_AGENT_SESSION=${session}-none /usr/bin/script -q $work/fail-nolog.out $launcher open >/dev/null )
+s15_nolog_status=$?
+s15_nolog_took=$(( EPOCHREALTIME - s15_nolog_start ))
+if stopped_with $work/fail-nolog.out $s15_nolog_status "herdr-agent: herdr's ${session}-none server didn't start (log: $work/badcfg2/herdr/sessions/${session}-none/herdr-agent-server.log)" &&
+   (( s15_nolog_took < 5 )); then
+  pass "a log that can't be opened stops open at once, with its two lines"
+else
+  fail "log failure output mismatch (took ${s15_nolog_took}s): $(cat $work/fail-nolog.out)"
+fi
+
+# 15.10 herdr answers a pane list that isn't JSON
+stub_herdr badpanes 'pane list' 'print -r -- not-json; exit 0'
+rm -f -- $work/attach.*(N) $work/fail-badpanes.out $work/noargs.calls
+s15_counts=$(open_counts)
+( cd $work/proj && PATH=$work/stub-badpanes:$PATH /usr/bin/script -q $work/fail-badpanes.out $launcher open >/dev/null )
+if stopped_with $work/fail-badpanes.out $? "herdr-agent: herdr couldn't open a shell tab in $session" &&
+   [[ $(open_counts) == "$s15_counts" ]]; then
+  pass "an answer open can't read stops it, and it makes no tab"
+else
+  fail "unreadable answer output mismatch (counts $s15_counts before, $(open_counts) after): $(cat $work/fail-badpanes.out)"
+fi
+
+# 15.10b herdr answers a workspace list, or a tab list, with nothing at all
+stub_herdr emptyws 'workspace list' 'exit 0'
+rm -f -- $work/attach.*(N) $work/fail-emptyws.out $work/noargs.calls
+s15_counts=$(open_counts)
+( cd $work/proj && PATH=$work/stub-emptyws:$PATH /usr/bin/script -q $work/fail-emptyws.out $launcher open >/dev/null )
+if stopped_with $work/fail-emptyws.out $? "herdr-agent: herdr couldn't open a shell tab in $session" &&
+   [[ $(open_counts) == "$s15_counts" ]]; then
+  pass "an empty workspace list stops open, and it makes no workspace and no tab"
+else
+  fail "empty workspace list output mismatch (counts $s15_counts before, $(open_counts) after): $(cat $work/fail-emptyws.out)"
+fi
+stub_herdr emptytabs 'tab list' 'exit 0'
+rm -f -- $work/attach.*(N) $work/fail-emptytabs.out $work/noargs.calls
+s15_counts=$(open_counts)
+( cd $work/proj && PATH=$work/stub-emptytabs:$PATH /usr/bin/script -q $work/fail-emptytabs.out $launcher open >/dev/null )
+if stopped_with $work/fail-emptytabs.out $? "herdr-agent: herdr couldn't open a shell tab in $session" &&
+   [[ $(open_counts) == "$s15_counts" ]]; then
+  pass "an empty tab list stops open, and it makes no workspace and no tab"
+else
+  fail "empty tab list output mismatch (counts $s15_counts before, $(open_counts) after): $(cat $work/fail-emptytabs.out)"
+fi
+
+# 15.11 the failure lines go to standard error: with that discarded, nothing is printed
+rm -f -- $work/attach.*(N) $work/fail-stderr.out $work/noargs.calls
+( cd $work/proj && PATH=$work/onlyherdr /usr/bin/script -q $work/fail-stderr.out /bin/zsh -fc 'exec "$@" 2>/dev/null' sized $launcher open >/dev/null )
+s15_stderr=$?
+typed $work/fail-stderr.out
+if [[ $s15_stderr == 1 && -z $typed_text ]] && no_attaches; then
+  pass "open's failure lines go to standard error"
+else
+  fail "failure lines reached standard output: status $s15_stderr, printed '$typed_text'"
+fi
+
+# Scenario 16: an agent launch keeps its own words for the same failure
+rm -f -- $work/attach.*(N) $work/launch-cap.out
+( cd $work/proj && PATH=$work/stub-cap:$PATH HERDR_AGENT_SESSION=${session}-none /usr/bin/script -q $work/launch-cap.out $links/pi >/dev/null )
+if grep -q "or run without herdr: HERDR_AGENT=off pi" $work/launch-cap.out &&
+   ! grep -q "nothing opened" $work/launch-cap.out; then
+  pass "an agent launch still ends the capability failure with its own advice"
+else
+  fail "agent launch capability advice mismatch: $(cat $work/launch-cap.out)"
+fi
+
+# Scenario 17: the README's shell block sends only bare herdr to open
+mkdir -p -- $work/home/.local/share/herdr-agent/bin
+touch $work/home/.local/share/herdr-agent/bin/claude
+chmod +x $work/home/.local/share/herdr-agent/bin/claude
+mkdir -p -- $work/home/.local/bin
+cat >$work/home/.local/bin/herdr-agent <<'EOF'
+#!/bin/zsh -f
+print -r -- "herdr-agent: $*" >>$HERDR_AGENT_CHECK_OUT/s17.calls
+EOF
+chmod +x $work/home/.local/bin/herdr-agent
+
+mkdir -p -- $work/stub-s17
+cat >$work/stub-s17/herdr <<'EOF'
+#!/bin/zsh -f
+print -r -- "herdr: $*" >>$HERDR_AGENT_CHECK_OUT/s17.calls
+EOF
+chmod +x $work/stub-s17/herdr
+
+readme_block=$(awk '/^And `~\/\.zshrc`/ { seen = 1; next } seen && /^```zsh/ { inblock = 1; next } inblock && /^```/ { exit } inblock' $here/README.md)
+
+rm -f -- $work/s17.calls
+/bin/zsh -f <<EOF
+HOME=${(q)work}/home
+PATH=${(q)work}/stub-s17:\$PATH
+HERDR_AGENT_CHECK_OUT=${(q)work}
+eval ${(qq)readme_block}
+
+herdr
+command herdr
+herdr session list
+CMUX_SURFACE_ID=surf1 herdr --remote host
+unset CMUX_SURFACE_ID
+herdr --remote host
+EOF
+
+expected_s17="herdr-agent: open
+herdr: 
+herdr: session list
+herdr-agent: attach --remote host
+herdr: --remote host"
+
+if [[ $(cat $work/s17.calls 2>/dev/null) == "$expected_s17" ]]; then
+  pass "the README's shell block sends bare herdr to open and leaves every other call alone"
+else
+  fail "README shell block calls mismatch: $(cat $work/s17.calls 2>/dev/null)"
+fi
+
+# Scenario 18: a folder outside any checkout
+mkdir -p -- $work/loose
+rm -f -- $work/attach.*(N)
+( cd $work/loose && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+ws_loose=$(h workspace list 2>/dev/null | jq -r 'first(.result.workspaces[] | select(.label == "loose") | .workspace_id) // empty')
+tab_loose=$(h tab list --workspace $ws_loose 2>/dev/null | jq -r 'first(.result.tabs[] | select(.label == "shell") | .tab_id) // empty')
+pane_loose=$(h pane list 2>/dev/null | jq -r --arg t "$tab_loose" '.result.panes[]? | select(.tab_id == $t) | .pane_id')
+
+if [[ -n $ws_loose && -n $tab_loose ]] && chose_tab $ws_loose $tab_loose $pane_loose; then
+  pass "outside a checkout, open made a workspace named for the folder, with a shell tab there, and chose it"
+else
+  fail "loose folder open failed"
+fi
+
+s18_name="herdr-agent-open-$$"
+mkdir -p -- $work/$s18_name
+# The rule walks up from the folder to a checkout. If the temp folder sits inside one, the session
+# picked would be that checkout's, a real one: run this only when the rule names the throwaway
+if [[ $(env -u HERDR_AGENT_SESSION $launcher session $work/$s18_name) == "$s18_name" ]]; then
+  rm -f -- $work/attach.*(N)
+  ( cd $work/$s18_name && env -u HERDR_AGENT_SESSION /usr/bin/script -q /dev/null $launcher open >/dev/null )
+  wait_for 13 attaches 1
+
+  split_nul s18_rec_args $work/attach.*(N)
+  s18_session=${s18_rec_args[1]}
+  s18_running=$($herdr session list --json 2>/dev/null | jq -r --arg s "$s18_name" '.sessions[]? | select(.name == $s) | .name')
+
+  if [[ $s18_session == "$s18_name" && $s18_running == "$s18_name" ]]; then
+    pass "with no session named, open picked the session named for the folder"
+  else
+    fail "expected session $s18_name, got attach session '$s18_session', running '$s18_running'"
+  fi
+
+  $herdr --session $s18_name server stop >/dev/null 2>&1
+  $herdr session delete $s18_name >/dev/null 2>&1
+  rm -rf -- $herdr_config/sessions/$s18_name
+
+  s18_still_listed=$($herdr session list --json 2>/dev/null | jq -r --arg s "$s18_name" '.sessions[]? | select(.name == $s) | .name')
+  if [[ -z $s18_still_listed && ! -d $herdr_config/sessions/$s18_name ]]; then
+    pass "the session open named for itself is stopped and its folder is gone"
+  else
+    fail "session $s18_name not properly cleaned up"
+  fi
+else
+  skip "with no session named, open picks the session named for the folder: the temp folder sits inside a checkout, which would name a real session (set TMPDIR to a folder outside any checkout)"
+fi
+
+# From the root folder, the workspace is labelled / and its shell tab is at /
+rm -f -- $work/attach.*(N)
+( cd / && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+ws_slash=$(h workspace list 2>/dev/null | jq -r 'first(.result.workspaces[] | select(.label == "/") | .workspace_id) // empty')
+tab_slash=$(h tab list --workspace $ws_slash 2>/dev/null | jq -r 'first(.result.tabs[] | select(.label == "shell") | .tab_id) // empty')
+pane_slash=$(pane_in_tab $tab_slash)
+if [[ -n $ws_slash && -n $tab_slash ]] && [[ $(pane_cwd_in_tab $tab_slash) == / ]] && chose_tab $ws_slash $tab_slash $pane_slash; then
+  pass "from the root folder, open made a workspace labelled /, with a shell tab there, and chose it"
+else
+  fail "root folder open failed: ws='$ws_slash' tab='$tab_slash'"
+fi
+
+# From home, the workspace is labelled ~. Home is a folder of the check's own; the herdr stand-in
+# puts the real HOME back for herdr, which finds its server and config through it
+mkdir -p -- $work/fakehome $work/stub-home
+cat >$work/stub-home/herdr <<EOF
+#!/bin/zsh -f
+HOME=${(q)HOME} exec ${(q)herdr} "\$@"
+EOF
+chmod +x $work/stub-home/herdr
+if [[ $(env -u HERDR_AGENT_SESSION $launcher session $work/fakehome) == fakehome ]]; then
+  rm -f -- $work/attach.*(N)
+  ( cd $work/fakehome && PATH=$work/stub-home:$PATH HOME=$work/fakehome /usr/bin/script -q /dev/null $launcher open >/dev/null )
+  wait_for 5 attaches 1
+
+  ws_home=$(h workspace list 2>/dev/null | jq -r 'first(.result.workspaces[] | select(.label == "~") | .workspace_id) // empty')
+  tab_home=$(h tab list --workspace $ws_home 2>/dev/null | jq -r 'first(.result.tabs[] | select(.label == "shell") | .tab_id) // empty')
+  pane_home=$(pane_in_tab $tab_home)
+  if [[ -n $ws_home && -n $tab_home ]] && chose_tab $ws_home $tab_home $pane_home; then
+    pass "from home, open made a workspace labelled ~, with a shell tab there, and chose it"
+  else
+    fail "home open failed: ws='$ws_home' tab='$tab_home'"
+  fi
+else
+  skip "from home, the workspace is labelled ~: the temp folder sits inside a checkout"
+fi
+
+# Scenario 19: two shell tabs at one folder: the first wins
+h tab create --workspace $ws_loose --cwd $work/loose --label shell --focus >/dev/null 2>&1
+rm -f -- $work/attach.*(N)
+( cd $work/loose && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+if chose_tab $ws_loose $tab_loose $pane_loose; then
+  pass "with two shell tabs at the folder, open chose the first in the tab bar"
+else
+  fail "did not choose the first shell tab"
+fi
+
+# Scenario 20: a shell tab that holds an agent is passed over
+rm -f -- $work/attach.*(N)
+( cd $work/proj/sub4 && /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+sub4_tab_1=$(h tab list --workspace $s10_ws2_id 2>/dev/null | jq -r '[.result.tabs[] | select(.label == "shell")][-1].tab_id')
+sub4_pane_1=$(h pane list 2>/dev/null | jq -r --arg t "$sub4_tab_1" '.result.panes[]? | select(.tab_id == $t) | .pane_id')
+
+mkdir -p -- $work/stub-agentlist
+cat >$work/stub-agentlist/herdr <<EOF
+#!/bin/zsh -f
+if [[ \$* == *"agent list"* ]]; then
+  real_ans=\$(${(q)herdr} "\$@")
+  print -r -- "\$real_ans" | jq --arg t "$sub4_tab_1" --arg p "$sub4_pane_1" '
+    .result.agents += [{
+      terminal_id: "term_test",
+      workspace_id: "$s10_ws2_id",
+      tab_id: \$t,
+      pane_id: \$p,
+      focused: false,
+      agent_status: "idle",
+      screen_detection_skipped: false,
+      state_labels: {},
+      tokens: {},
+      state_change_seq: 1
+    }]'
+  exit 0
+fi
+exec ${(q)herdr} "\$@"
+EOF
+chmod +x $work/stub-agentlist/herdr
+
+rm -f -- $work/attach.*(N)
+( cd $work/proj/sub4 && PATH=$work/stub-agentlist:$PATH /usr/bin/script -q /dev/null $launcher open >/dev/null )
+wait_for 5 attaches 1
+
+sub4_tab_2=$(h tab list --workspace $s10_ws2_id 2>/dev/null | jq -r '[.result.tabs[] | select(.label == "shell")][-1].tab_id')
+sub4_pane_2=$(h pane list 2>/dev/null | jq -r --arg t "$sub4_tab_2" '.result.panes[]? | select(.tab_id == $t) | .pane_id')
+
+if [[ $sub4_tab_1 != "$sub4_tab_2" ]] && chose_tab $s10_ws2_id $sub4_tab_2 $sub4_pane_2; then
+  pass "a shell tab herdr lists an agent in was passed over, and a new shell tab was chosen"
+else
+  fail "shell tab with agent was not passed over: tab1=$sub4_tab_1 tab2=$sub4_tab_2"
+fi
+
+# Scenario 21: it writes nothing but locks (checked last, so every open of section 6 counts)
+# Every open of section 6 ran against this section's own state folder, workspace and tab creates,
+# the server starts, the subfolder, outside-a-checkout and root runs included. Agent launches write
+# their notes elsewhere. Only the folders and empty lock files, however many, may be in it
+s21_state=$HERDR_AGENT_STATE_DIR
+s21_extra=()
+for s21_file in ${(f)"$(find $s21_state 2>/dev/null)"}; do
+  [[ $s21_file == $s21_state || $s21_file == $s21_state/locks ||
+    ( $s21_file == $s21_state/locks/*.lock && -f $s21_file && ! -s $s21_file ) ]] || s21_extra+=($s21_file)
+done
+# (the launch files named for this session only: another agent may be launching meanwhile)
+s21_launch_after=($launch_dir/$session.*(N))
+s21_extra+=(${s21_launch_after:|s21_launch_before})
+if [[ -f $s21_state/locks/$session.lock ]] && (( $#s21_extra == 0 )); then
+  pass "the opens of section 6 left only empty lock files, and no launch file"
+else
+  fail "open left extra files: ${s21_extra[*]}"
 fi
 
 print
