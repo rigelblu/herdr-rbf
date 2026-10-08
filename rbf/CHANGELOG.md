@@ -8,6 +8,18 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.11.0 (2026-10-07)
+## 🟠⋯ 🚨 Breaking Changes for End Users
+- 2026-10-07 - feat (BREAKING ux) | herdr now removes a stopped session 3 days after it was last in use, and a removed session can't be restored. The first removal runs a few minutes after the install and takes every stopped session already past 3 days. To keep one, attach to it once before installing. `default` is never removed (#hrdr-19)
+
+## 🟠⋯ Added for End Users
+- 2026-10-07 - feat (user need) | My session list stops filling up with sessions I finished with weeks ago. A session counts as in use while a terminal window shows it or one of its agents is working or blocked. Running sessions are left alone (#hrdr-19)
+
+## 🟠⋯ Added for Technical Users
+- 2026-10-07 - feat (technical) | `[session] remove_inactive_after_hours` sets the limit in hours, default `72`, decimals allowed. `0` turns removal off, and so does a value herdr can't read. Each running server checks once a minute and picks up a changed value without a restart. Each session folder gains two empty files, `in-use` and `in-use-check`. `herdr session list` only reads (#hrdr-19)
+
+---
+
 # 🔵⋯ v0.10.0 (2026-10-05)
 ## 🟠⋯ 🚨 Breaking Changes for End Users
 - 2026-10-05 - feat (BREAKING ux) | A failed agent's output prints in a new order: its lines first, with no indent, then a blank line, then herdr's line. They used to follow herdr's line, indented two spaces (#hrdr-23)
