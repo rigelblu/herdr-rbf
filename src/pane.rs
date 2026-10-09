@@ -3368,7 +3368,7 @@ impl PaneRuntime {
         (self.content_seq() == revision).then_some(snapshot)
     }
 
-    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
+    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, std::sync::Arc<str>)> {
         self.terminal.visible_hyperlinks(area)
     }
 

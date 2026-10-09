@@ -21,6 +21,7 @@ mod migration_tests;
 mod web_link_profile;
 #[cfg(test)]
 mod web_link_tests;
+mod web_links;
 #[cfg(windows)]
 mod windows_recent_fallback;
 
@@ -109,9 +110,14 @@ pub struct TerminalCursorState {
     pub shape: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct TerminalDirtyPatch {
     pub rows: Vec<(u16, Vec<CellData>)>,
+    /// The first viewport row continues a token from above it that holds a web
+    /// scheme or is too long to resolve, so hidden text may decide a link.
+    pub top_edge_may_link: bool,
+    /// The same for the last viewport row and the token continuing below it.
+    pub bottom_edge_may_link: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,7 +557,7 @@ impl PaneTerminal {
         self.ghostty.collect_dirty_patch(area_width, area_height)
     }
 
-    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
+    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, std::sync::Arc<str>)> {
         self.ghostty.visible_hyperlinks(area)
     }
 
@@ -2312,7 +2318,7 @@ impl GhosttyPaneTerminal {
             .and_then(|mut core| ghostty_extract_selection(&mut core, selection).ok())
     }
 
-    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
+    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, std::sync::Arc<str>)> {
         self.core
             .lock()
             .ok()
@@ -2565,7 +2571,7 @@ fn cursor_state_from_render_state(
     })
 }
 
-type VisibleHyperlinks = Vec<((u16, u16), String, String)>;
+type VisibleHyperlinks = Vec<((u16, u16), String, std::sync::Arc<str>)>;
 
 fn ghostty_clear_render_dirty(render_state: &mut crate::ghostty::RenderState, area_height: u16) {
     if render_state.rows().is_ok_and(|rows| area_height >= rows) && render_state.clean().is_ok() {
@@ -2738,8 +2744,15 @@ fn ghostty_collect_dirty_patch(
         fallback!("set_clean_error");
     }
 
+    // A token that runs past a viewport edge hides text the patch cannot show.
+    // Unknown is treated as risky.
+    let (top_edge_may_link, bottom_edge_may_link) = terminal
+        .viewport_edge_tokens_may_link()
+        .unwrap_or((true, true));
     finish!(TerminalDirtyPatchOutcome::Patch(TerminalDirtyPatch {
-        rows: patch_rows
+        rows: patch_rows,
+        top_edge_may_link,
+        bottom_edge_may_link,
     }));
 }
 
@@ -2753,23 +2766,72 @@ fn ghostty_visible_hyperlinks(
         ..
     } = core;
     render_state.update(terminal)?;
-    let mut row_iterator = crate::ghostty::RowIterator::new()?;
-    let mut row_cells = crate::ghostty::RowCells::new()?;
-    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
     let mut links = Vec::new();
-    let mut y = 0u16;
-    while y < area.height && rows.next() {
-        let mut cells = rows.populate_cells(&mut row_cells)?;
-        let mut x = 0u16;
-        while x < area.width && cells.next() {
-            if cells.has_hyperlink()? {
-                if let Some(uri) = terminal.viewport_hyperlink_uri(x, y.into())? {
-                    links.push(((area.x + x, area.y + y), ghostty_cell_symbol(&cells)?, uri));
+    let mut inferred = Vec::new();
+    {
+        let mut row_iterator = crate::ghostty::RowIterator::new()?;
+        let mut row_cells = crate::ghostty::RowCells::new()?;
+        let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+        let mut scanner = web_links::SchemeScanner::new();
+        let mut y = 0u16;
+        while y < area.height && rows.next() {
+            let continues_previous_row = rows.wrap_state()?.1;
+            scanner.start_row(continues_previous_row);
+            let mut cells = rows.populate_cells(&mut row_cells)?;
+            let mut x = 0u16;
+            while x < area.width && cells.next() {
+                let cell = cells.scan_data()?;
+                let seed = if cell.has_hyperlink {
+                    // Linked text never seeds a plain URL, but linked whitespace
+                    // still ends the plain token before it.
+                    let kind = match web_links::classify(cell.codepoint, cell.wide) {
+                        web_links::ScanCell::Blank => web_links::ScanCell::Blank,
+                        _ => web_links::ScanCell::Opaque,
+                    };
+                    scanner.cell(x, y, kind);
+                    if let Some(uri) = terminal.viewport_hyperlink_uri(x, y.into())? {
+                        links.push((
+                            (area.x + x, area.y + y),
+                            ghostty_cell_symbol(&cells)?,
+                            uri.into(),
+                        ));
+                    }
+                    None
+                } else {
+                    let kind = web_links::classify(cell.codepoint, cell.wide);
+                    let scheme = scanner.cell(x, y, kind);
+                    // A viewport that opens inside a wrapped token has the
+                    // scheme above it; the first cell speaks for the token.
+                    let above = (x == 0
+                        && y == 0
+                        && continues_previous_row
+                        && kind != web_links::ScanCell::Blank)
+                        .then_some((0, 0));
+                    scheme.or(above)
+                };
+                if let Some((seed_x, seed_y)) = seed {
+                    // Inference is best effort: a failed lookup must not drop
+                    // the explicit links already collected.
+                    match terminal.viewport_web_link(
+                        seed_x,
+                        u32::from(seed_y),
+                        crate::web_url::url_byte_range,
+                    ) {
+                        Ok(Some(link)) => {
+                            scanner.skip_token();
+                            inferred.push(link);
+                        }
+                        Ok(None) => {}
+                        Err(error) => debug!(?error, "web link lookup failed"),
+                    }
                 }
+                x += 1;
             }
-            x += 1;
+            y += 1;
         }
-        y += 1;
+    }
+    if !inferred.is_empty() {
+        web_links::append_inferred_links(render_state, area, &inferred, &mut links)?;
     }
     Ok(links)
 }

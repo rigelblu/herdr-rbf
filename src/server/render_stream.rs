@@ -464,7 +464,7 @@ impl Backend for CursorTrackingBackend {
 pub(crate) type RenderedTabSurface = (
     ratatui::buffer::Buffer,
     Option<CursorState>,
-    Vec<((u16, u16), String, String)>,
+    Vec<((u16, u16), String, std::sync::Arc<str>)>,
     crate::ui::TabSurfaceLayout,
 );
 
