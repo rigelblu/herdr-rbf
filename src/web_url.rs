@@ -100,7 +100,22 @@ pub(crate) fn url_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Opti
 fn trim_url_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
     let start = span.start;
     let mut end = span.end;
-    while start <= end && should_trim_trailing_url_cell(cells, start, end) {
+    // Net open-minus-close count per bracket pair over the cells before `end`,
+    // kept as `end` moves left so each trim step costs O(1).
+    let mut depth = [0i32; 3];
+    for cell in &cells[start..=end] {
+        if let Some((pair, delta)) = bracket_delta(cell.ch) {
+            depth[pair] += delta;
+        }
+    }
+    while start <= end {
+        let ch = cells[end].ch;
+        if let Some((pair, delta)) = bracket_delta(ch) {
+            depth[pair] -= delta;
+        }
+        if !should_trim_trailing_url_cell(ch, &depth) {
+            break;
+        }
         if end == 0 {
             return None;
         }
@@ -109,32 +124,28 @@ fn trim_url_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
     (start <= end).then_some(CellSpan { start, end })
 }
 
-fn should_trim_trailing_url_cell(cells: &[TextCell], start: usize, end: usize) -> bool {
-    match cells[end].ch {
-        '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?' => true,
-        ')' => !trailing_url_closer_is_balanced(cells, start, end, '(', ')'),
-        ']' => !trailing_url_closer_is_balanced(cells, start, end, '[', ']'),
-        '}' => !trailing_url_closer_is_balanced(cells, start, end, '{', '}'),
-        _ => false,
+/// Bracket pair index and the effect of this character on its open count.
+fn bracket_delta(ch: char) -> Option<(usize, i32)> {
+    match ch {
+        '(' => Some((0, 1)),
+        ')' => Some((0, -1)),
+        '[' => Some((1, 1)),
+        ']' => Some((1, -1)),
+        '{' => Some((2, 1)),
+        '}' => Some((2, -1)),
+        _ => None,
     }
 }
 
-fn trailing_url_closer_is_balanced(
-    cells: &[TextCell],
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    open: char,
-    close: char,
-) -> bool {
-    let mut balance = 0i32;
-    for cell in &cells[start..end] {
-        if cell.ch == open {
-            balance += 1;
-        } else if cell.ch == close {
-            balance -= 1;
-        }
+/// `depth` counts the cells before `ch`; a closer stays only if it balances one.
+fn should_trim_trailing_url_cell(ch: char, depth: &[i32; 3]) -> bool {
+    match ch {
+        '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?' => true,
+        ')' => depth[0] <= 0,
+        ']' => depth[1] <= 0,
+        '}' => depth[2] <= 0,
+        _ => false,
     }
-    balance > 0
 }
 
 fn starts_with_chars(cells: &[TextCell], prefix: &str) -> bool {

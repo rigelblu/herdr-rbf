@@ -43,7 +43,7 @@ impl Source {
         self.pane
             .visible_hyperlinks(Rect::new(0, 0, self.cols, self.rows))
             .into_iter()
-            .map(|(cell, _symbol, uri)| (cell, uri))
+            .map(|(cell, _symbol, uri)| (cell, uri.to_string()))
             .collect()
     }
 }
@@ -84,11 +84,7 @@ fn hrdr25_boundaries_http_and_https_cover_one_and_several_rows() {
     assert_links(&wrapped, &[(0, 0, 11), (1, 0, 11), (2, 0, 2)], url);
 
     let wrapped_http = Source::new(10, 5, format!("go {plain} x").as_bytes());
-    assert_links(
-        &wrapped_http,
-        &[(0, 3, 9), (1, 0, 9), (2, 0, 8)],
-        plain,
-    );
+    assert_links(&wrapped_http, &[(0, 3, 9), (1, 0, 9), (2, 0, 8)], plain);
 }
 
 #[test]
@@ -168,7 +164,10 @@ fn hrdr25_boundaries_ignore_other_schemes_and_invalid_text() {
         "http:/example.com",
         "see https",
     ] {
-        assert!(Source::new(40, 3, text.as_bytes()).links().is_empty(), "{text}");
+        assert!(
+            Source::new(40, 3, text.as_bytes()).links().is_empty(),
+            "{text}"
+        );
     }
 }
 
@@ -176,7 +175,7 @@ const LONG: &str = "https://example.com/abcdefghijabcdefghijabcdefghij";
 
 #[test]
 fn hrdr25_viewport_clipped_top_keeps_the_complete_target() {
-    let mut source = Source::new(20, 3, format!("{LONG}\r\nx\r\ny\r\nz").as_bytes());
+    let source = Source::new(20, 3, format!("{LONG}\r\nx\r\ny\r\nz").as_bytes());
     assert!(source.links().is_empty(), "link scrolled out of view");
     source.pane.scroll_up(1);
     assert_links(&source, &[(0, 0, 9)], LONG);
@@ -188,7 +187,7 @@ fn hrdr25_viewport_clipped_top_keeps_the_complete_target() {
 
 #[test]
 fn hrdr25_viewport_clipped_bottom_keeps_the_complete_target() {
-    let mut source = Source::new(20, 3, format!("a\r\nb\r\n{LONG}\r\nc").as_bytes());
+    let source = Source::new(20, 3, format!("a\r\nb\r\n{LONG}\r\nc").as_bytes());
     source.pane.scroll_up(10);
     assert_links(&source, &[(2, 0, 19)], LONG);
     source.pane.scroll_down(1);
@@ -249,4 +248,55 @@ fn hrdr25_budget_over_budget_tokens_fail_closed_without_hiding_neighbours() {
     let links = source.links();
     assert_eq!(links.len(), ok.len());
     assert!(links.values().all(|target| target == ok));
+}
+
+#[test]
+fn hrdr25_boundaries_explicit_whitespace_ends_a_token_before_the_next_plain_url() {
+    // The explicit label's own spaces are linked cells. They still end the
+    // plain token before them and must not suppress the plain URL after them.
+    let one = "https://one.test/a";
+    let two = "https://two.test/b";
+    let text = format!("{one}\x1b]8;;https://docs.test\x1b\\ docs \x1b]8;;\x1b\\{two}");
+    let source = Source::new(80, 3, text.as_bytes());
+    let links = source.links();
+    // one: cols 0..=17; label " docs ": cols 18..=23; two: cols 24..=41.
+    assert_eq!(
+        links.keys().copied().collect::<BTreeSet<_>>(),
+        cells(&[(0, 0, 17), (0, 18, 23), (0, 24, 41)])
+    );
+    for x in 0..=17 {
+        assert_eq!(links[&(x, 0)], one, "col {x}");
+    }
+    for x in 18..=23 {
+        assert_eq!(links[&(x, 0)], "https://docs.test", "col {x}");
+    }
+    for x in 24..=41 {
+        assert_eq!(links[&(x, 0)], two, "col {x}");
+    }
+}
+
+#[test]
+fn hrdr25_budget_near_budget_valid_url_links_every_visible_cell() {
+    // 8170 cells is inside the 8192-cell bound. At 120x40 only the tail of the
+    // token is visible, and every visible cell carries the complete target.
+    let url = format!("https://example.com/{}", "a".repeat(8150));
+    let source = Source::new(120, 40, url.as_bytes());
+    let links = source.links();
+    assert!(!links.is_empty());
+    assert!(links.values().all(|target| *target == url));
+    let visible = usize::from(120u16) * (url.len().div_ceil(120).min(40));
+    assert!(links.len() <= visible);
+}
+
+#[test]
+fn hrdr25_budget_unmatched_closing_brackets_trim_to_the_url() {
+    // 7000 unmatched closers keep the token inside the budget. The grammar
+    // trims all of them, leaving only the 10-cell URL.
+    let text = format!("https://x/{}", ")".repeat(7000));
+    let source = Source::new(80, 100, text.as_bytes());
+    assert_links(&source, &[(0, 0, 9)], "https://x/");
+
+    let text = format!("https://x/(a){}", "]".repeat(7000));
+    let source = Source::new(80, 100, text.as_bytes());
+    assert_links(&source, &[(0, 0, 12)], "https://x/(a)");
 }

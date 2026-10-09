@@ -28,6 +28,104 @@ fn patch_intersects_hyperlinks(
         })
 }
 
+/// Whether a patch could add, change, or remove an inferred web link.
+///
+/// The retained frame cannot answer this from link metadata alone: typing a
+/// URL into text that had no link leaves nothing marked to compare against.
+/// So treat any dirty row as risky when a scheme sits in the run of text it
+/// could belong to, before or after the patch. That run extends over every row
+/// boundary where the last cell of one row and the first of the next both hold
+/// text, which is a superset of the real soft wraps. A false positive costs one
+/// complete render; a false negative would leave a stale or missing target.
+fn patch_may_change_web_links(
+    frame: &FrameData,
+    area: protocol::SurfaceRect,
+    patch: &crate::pane::TerminalDirtyPatch,
+) -> bool {
+    if !rect_fits_frame(area, frame) {
+        return false;
+    }
+    let width = usize::from(area.width);
+    let height = usize::from(area.height);
+    let frame_rows = (0..height)
+        .map(|y| {
+            let start = usize::from(area.y) * usize::from(frame.width)
+                + y * usize::from(frame.width)
+                + usize::from(area.x);
+            frame.cells.get(start..start + width)
+        })
+        .collect::<Vec<_>>();
+    let mut dirty = Vec::with_capacity(patch.rows.len());
+    let mut patched_rows = frame_rows.clone();
+    for (local_y, cells) in &patch.rows {
+        let y = usize::from(*local_y);
+        if y >= height {
+            continue;
+        }
+        let Some(cells) = cells.get(..width) else {
+            return true;
+        };
+        patched_rows[y] = Some(cells);
+        dirty.push(y);
+    }
+    dirty.sort_unstable();
+    dirty.dedup();
+    let edges = (patch.top_edge_may_link, patch.bottom_edge_may_link);
+    rows_hold_web_scheme_near(&frame_rows, &dirty, edges)
+        || rows_hold_web_scheme_near(&patched_rows, &dirty, edges)
+}
+
+fn rows_hold_web_scheme_near(
+    rows: &[Option<&[protocol::CellData]>],
+    dirty: &[usize],
+    (top_edge_may_link, bottom_edge_may_link): (bool, bool),
+) -> bool {
+    let mut checked_through = 0;
+    for &y in dirty {
+        if y < checked_through {
+            continue;
+        }
+        let mut first = y;
+        while first > 0 && rows_join(rows, first - 1) {
+            first -= 1;
+        }
+        let mut last = y;
+        while last + 1 < rows.len() && rows_join(rows, last) {
+            last += 1;
+        }
+        checked_through = last + 1;
+        let reaches_edge =
+            (first == 0 && top_edge_may_link) || (last + 1 == rows.len() && bottom_edge_may_link);
+        let mut text = Vec::new();
+        for row in &rows[first..=last] {
+            let Some(row) = row else {
+                return true;
+            };
+            text.extend(row.iter().flat_map(|cell| cell.symbol.bytes()));
+        }
+        if text.windows(7).any(|w| w == b"http://") || text.windows(8).any(|w| w == b"https://") {
+            return true;
+        }
+        // A run that touches the top or bottom row may be one token with text
+        // outside the viewport, where a scheme can hide. Only the source knows.
+        if reaches_edge && text.iter().any(|b| !b.is_ascii_whitespace()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Row `y` and the next may be one soft-wrapped token.
+fn rows_join(rows: &[Option<&[protocol::CellData]>], y: usize) -> bool {
+    let holds_text = |cell: Option<&protocol::CellData>| {
+        cell.is_none_or(|cell| cell.symbol.is_empty() || !cell.symbol.trim().is_empty())
+    };
+    match (rows[y], rows[y + 1]) {
+        (Some(upper), Some(lower)) => holds_text(upper.last()) && holds_text(lower.first()),
+        _ => true,
+    }
+}
+
 fn patch_row_changed(frame: &FrameData, row: &protocol::PaneSurfacePatchRow) -> Option<bool> {
     if row.y >= frame.height
         || row.x.saturating_add(u16::try_from(row.cells.len()).ok()?) > frame.width
@@ -343,7 +441,7 @@ impl HeadlessServer {
             let patch = match snapshot.patch {
                 crate::pane::TerminalDirtyPatchOutcome::Clean => {
                     crate::render_prof::event("retained_surface.pane_clean");
-                    crate::pane::TerminalDirtyPatch { rows: Vec::new() }
+                    crate::pane::TerminalDirtyPatch::default()
                 }
                 crate::pane::TerminalDirtyPatchOutcome::Patch(patch) => patch,
                 crate::pane::TerminalDirtyPatchOutcome::Fallback => {
@@ -393,6 +491,13 @@ impl HeadlessServer {
                     &collected_pane.patch,
                 ) {
                     fallback!("hyperlink");
+                }
+                if patch_may_change_web_links(
+                    &surface.frame,
+                    pane.inner_rect,
+                    &collected_pane.patch,
+                ) {
+                    fallback!("web_link");
                 }
                 refresh_graphics |= collected_pane.graphics_may_have_placements;
                 let previous_pane = pane.clone();
@@ -599,6 +704,7 @@ mod tests {
         };
         let patch = crate::pane::TerminalDirtyPatch {
             rows: vec![(0, vec![cell(" "), cell("x"), cell("y"), cell(" ")])],
+            ..Default::default()
         };
 
         let rows = changed_rows(
@@ -636,6 +742,7 @@ mod tests {
         };
         let patch = crate::pane::TerminalDirtyPatch {
             rows: vec![(0, vec![cell("x"), cell("z"), cell("q")])],
+            ..Default::default()
         };
 
         let rows = changed_rows(
@@ -672,6 +779,7 @@ mod tests {
         };
         let patch = crate::pane::TerminalDirtyPatch {
             rows: vec![(0, vec![cell(" "); 4]), (1, vec![cell(" "); 4])],
+            ..Default::default()
         };
 
         let rows = changed_rows(
@@ -687,5 +795,163 @@ mod tests {
         .expect("valid patch");
 
         assert!(rows.is_empty());
+    }
+
+    fn frame_of(width: u16, rows: &[&str]) -> FrameData {
+        let cells = rows
+            .iter()
+            .flat_map(|row| {
+                assert_eq!(row.chars().count(), usize::from(width), "{row:?}");
+                row.chars().map(|ch| cell(&ch.to_string()))
+            })
+            .collect();
+        FrameData {
+            width,
+            height: rows.len() as u16,
+            cells,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        }
+    }
+
+    fn patch_of(rows: &[(u16, &str)]) -> crate::pane::TerminalDirtyPatch {
+        crate::pane::TerminalDirtyPatch {
+            rows: rows
+                .iter()
+                .map(|(y, row)| (*y, row.chars().map(|ch| cell(&ch.to_string())).collect()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn area(x: u16, y: u16, width: u16, height: u16) -> protocol::SurfaceRect {
+        protocol::SurfaceRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn hrdr25_incremental_guard_flags_a_scheme_arriving_in_a_dirty_row() {
+        let frame = frame_of(10, &["plain     ", "text      ", "          "]);
+        let patch = patch_of(&[(1, "http://a/b")]);
+        assert!(patch_may_change_web_links(
+            &frame,
+            area(0, 0, 10, 3),
+            &patch
+        ));
+    }
+
+    #[test]
+    fn hrdr25_incremental_guard_flags_a_scheme_leaving_a_dirty_row() {
+        let frame = frame_of(10, &["plain     ", "https://a/", "          "]);
+        let patch = patch_of(&[(1, "plain text")]);
+        assert!(patch_may_change_web_links(
+            &frame,
+            area(0, 0, 10, 3),
+            &patch
+        ));
+    }
+
+    #[test]
+    fn hrdr25_incremental_guard_ignores_prose_and_text_that_cannot_join() {
+        let frame = frame_of(10, &["https://a/", "          ", "word      "]);
+        let patch = patch_of(&[(2, "other     ")]);
+        assert!(!patch_may_change_web_links(
+            &frame,
+            area(0, 0, 10, 3),
+            &patch
+        ));
+        assert!(!patch_may_change_web_links(
+            &frame,
+            area(0, 0, 10, 3),
+            &patch_of(&[])
+        ));
+    }
+
+    #[test]
+    fn hrdr25_incremental_guard_follows_text_across_row_boundaries() {
+        let wrapped = frame_of(10, &["abcd http:", "//x       "]);
+        let patch = patch_of(&[(1, "//y       ")]);
+        assert!(patch_may_change_web_links(
+            &wrapped,
+            area(0, 0, 10, 2),
+            &patch
+        ));
+
+        // The patched row alone holds no scheme; the one above does and joins it.
+        let patch = patch_of(&[(0, "abcd http:")]);
+        assert!(patch_may_change_web_links(
+            &wrapped,
+            area(0, 0, 10, 2),
+            &patch
+        ));
+
+        let split = frame_of(10, &["abcd http:", " //x      "]);
+        let patch = patch_of(&[(1, " //y      ")]);
+        assert!(!patch_may_change_web_links(
+            &split,
+            area(0, 0, 10, 2),
+            &patch
+        ));
+    }
+
+    #[test]
+    fn hrdr25_incremental_guard_reads_only_the_pane_area() {
+        let frame = frame_of(12, &["            ", "https://zz  ", "ab http://xy"]);
+        let pane = area(2, 1, 8, 2);
+        // Columns 2..10 of the first row read "tps://zz": no scheme in the pane.
+        assert!(!patch_may_change_web_links(
+            &frame,
+            pane,
+            &patch_of(&[(0, "tps://zz")])
+        ));
+        assert!(patch_may_change_web_links(
+            &frame,
+            pane,
+            &patch_of(&[(1, " http://")])
+        ));
+    }
+
+    #[test]
+    fn hrdr25_incremental_guard_flags_tokens_that_continue_past_a_viewport_edge() {
+        // Full rows join into one run that reaches the top row. Blanking the
+        // first cell of row 1 can make the visible prefix eligible when its
+        // scheme sits above the viewport, which no visible text can show.
+        let frame = frame_of(10, &["aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa"]);
+        let mut patch = patch_of(&[(1, " aaaaaaaaa")]);
+        assert!(!patch_may_change_web_links(
+            &frame,
+            area(0, 0, 10, 3),
+            &patch
+        ));
+        patch.top_edge_may_link = true;
+        assert!(patch_may_change_web_links(
+            &frame,
+            area(0, 0, 10, 3),
+            &patch
+        ));
+
+        // The same holds at the bottom edge, where text may wrap onward below.
+        let mut patch = patch_of(&[(1, "aaaaaaaaa ")]);
+        patch.bottom_edge_may_link = true;
+        assert!(patch_may_change_web_links(
+            &frame,
+            area(0, 0, 10, 3),
+            &patch
+        ));
+
+        // Blank rows at the edge carry no token.
+        let blank = frame_of(10, &["          ", "          ", "          "]);
+        let mut patch = patch_of(&[(0, "          ")]);
+        patch.top_edge_may_link = true;
+        assert!(!patch_may_change_web_links(
+            &blank,
+            area(0, 0, 10, 3),
+            &patch
+        ));
     }
 }

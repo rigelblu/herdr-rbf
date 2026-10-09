@@ -27,6 +27,7 @@
 //! and minimize cursor movement.
 
 use std::cmp;
+use std::collections::HashMap;
 use std::io::Write;
 
 use unicode_width::UnicodeWidthStr;
@@ -277,8 +278,7 @@ fn compute_prof_blit_stats(
         };
     }
 
-    let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
-    let prev_sanitized_hyperlinks = sanitized_frame_hyperlinks(prev);
+    let mut targets = LinkTargets::new(frame, prev);
     let mut stats = ProfBlitStats {
         scanned_cells: frame.cells.len() as u64,
         changed_cells: 0,
@@ -293,12 +293,7 @@ fn compute_prof_blit_stats(
             let cell = &frame.cells[idx];
             let prev_cell = &prev.cells[idx];
             let changed = !cell.skip
-                && (!cells_visually_equal(
-                    &sanitized_hyperlinks,
-                    cell,
-                    &prev_sanitized_hyperlinks,
-                    prev_cell,
-                ) || invalidated > 0)
+                && (!cells_visually_equal(&mut targets, cell, prev_cell) || invalidated > 0)
                 && to_skip == 0;
             if changed {
                 stats.changed_cells += 1;
@@ -596,6 +591,7 @@ fn blit_patch_to(
     let _ = writer.write_all(b"\x1b[?2026h\x1b[?25l\x1b]8;;\x1b\\");
     let mut last_sgr = String::new();
     let mut active_hyperlink = None;
+    let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
     for row in rows {
         let mut invalidated = 0usize;
         let mut to_skip = 0usize;
@@ -613,7 +609,7 @@ fn blit_patch_to(
                     cell,
                     &mut last_sgr,
                     &mut active_hyperlink,
-                    frame,
+                    &sanitized_hyperlinks,
                 );
                 next_inline_col = (cell.symbol.is_ascii() && cell_width(cell) == 1)
                     .then_some(col.saturating_add(1));
@@ -839,6 +835,7 @@ fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorStat
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
     let mut last_sgr = String::new();
     let mut active_hyperlink = None;
+    let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
     for row in 0..frame.height {
         let mut to_skip = 0usize;
         let mut next_inline_col = None;
@@ -863,7 +860,7 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
                 cell,
                 &mut last_sgr,
                 &mut active_hyperlink,
-                frame,
+                &sanitized_hyperlinks,
             );
             let width = cell_width(cell);
             next_inline_col =
@@ -878,12 +875,15 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
     let _ = writer.write_all(b"\x1b[0m");
 }
 
-fn cell_hyperlink_uri<'a>(frame: &'a FrameData, cell: &CellData) -> Option<&'a str> {
-    let index = cell.hyperlink? as usize;
-    frame.hyperlinks.get(index).map(String::as_str)
+#[cfg(test)]
+thread_local! {
+    /// Targets sanitized so far. Tests assert it counts table entries, not cells.
+    static TARGETS_SANITIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn sanitized_hyperlink_uri(uri: &str) -> Option<String> {
+    #[cfg(test)]
+    TARGETS_SANITIZED.with(|count| count.set(count.get() + 1));
     let sanitized: String = uri
         .chars()
         .filter(|ch| *ch != '\x1b' && *ch != '\x07' && !ch.is_control())
@@ -899,34 +899,73 @@ fn sanitized_frame_hyperlinks(frame: &FrameData) -> Vec<Option<String>> {
         .collect()
 }
 
-fn sanitized_cell_hyperlink_uri<'a>(
-    sanitized_hyperlinks: &'a [Option<String>],
-    cell: &CellData,
-) -> Option<&'a str> {
-    let index = cell.hyperlink? as usize;
-    sanitized_hyperlinks.get(index)?.as_deref()
+/// Sanitized targets of two frames. Whether a pair of targets is the same is
+/// decided once per distinct pair of table entries, not once per cell: a long
+/// URI shared by thousands of cells is compared and sanitized a single time.
+struct LinkTargets {
+    current: Vec<Option<String>>,
+    previous: Vec<Option<String>>,
+    same: HashMap<(Option<u32>, Option<u32>), bool>,
 }
 
+impl LinkTargets {
+    fn new(frame: &FrameData, prev: &FrameData) -> Self {
+        Self {
+            current: sanitized_frame_hyperlinks(frame),
+            previous: sanitized_frame_hyperlinks(prev),
+            same: HashMap::new(),
+        }
+    }
+
+    fn same_target(&mut self, cell: &CellData, prev_cell: &CellData) -> bool {
+        let pair = (cell.hyperlink, prev_cell.hyperlink);
+        if pair == (None, None) {
+            return true;
+        }
+        let (current, previous) = (&self.current, &self.previous);
+        *self
+            .same
+            .entry(pair)
+            .or_insert_with(|| table_target(current, pair.0) == table_target(previous, pair.1))
+    }
+}
+
+fn table_target(table: &[Option<String>], index: Option<u32>) -> Option<&str> {
+    table.get(index? as usize)?.as_deref()
+}
+
+/// Opens, switches or closes the host's active link for a cell. `active` and
+/// `requested` are table indexes; entries whose sanitized text is equal count as
+/// one link, so reusing an index never re-sanitizes or re-copies the target.
 fn write_hyperlink_if_changed(
     writer: &mut impl Write,
-    active: &mut Option<String>,
-    requested: Option<&str>,
+    active: &mut Option<usize>,
+    requested: Option<u32>,
+    sanitized: &[Option<String>],
 ) {
-    let requested = requested.and_then(sanitized_hyperlink_uri);
-    if active.as_deref() == requested.as_deref() {
+    let requested = requested
+        .map(|index| index as usize)
+        .filter(|index| sanitized.get(*index).is_some_and(Option::is_some));
+    if *active == requested {
         return;
+    }
+    if let (Some(current), Some(next)) = (*active, requested) {
+        if sanitized[current] == sanitized[next] {
+            *active = requested;
+            return;
+        }
     }
 
     if active.is_some() {
         let _ = writer.write_all(b"\x1b]8;;\x1b\\");
     }
     *active = requested;
-    if let Some(uri) = active.as_deref() {
+    if let Some(uri) = active.and_then(|index| sanitized[index].as_deref()) {
         let _ = write!(writer, "\x1b]8;;{uri}\x1b\\");
     }
 }
 
-fn close_hyperlink(writer: &mut impl Write, active: &mut Option<String>) {
+fn close_hyperlink(writer: &mut impl Write, active: &mut Option<usize>) {
     if active.take().is_some() {
         let _ = writer.write_all(b"\x1b]8;;\x1b\\");
     }
@@ -937,8 +976,8 @@ fn write_cell(
     cursor_position: Option<(u16, u16)>,
     cell: &CellData,
     last_sgr: &mut String,
-    active_hyperlink: &mut Option<String>,
-    frame: &FrameData,
+    active_hyperlink: &mut Option<usize>,
+    sanitized_hyperlinks: &[Option<String>],
 ) {
     if cell.skip {
         return;
@@ -954,31 +993,29 @@ fn write_cell(
         *last_sgr = sgr;
     }
 
-    write_hyperlink_if_changed(writer, active_hyperlink, cell_hyperlink_uri(frame, cell));
+    write_hyperlink_if_changed(
+        writer,
+        active_hyperlink,
+        cell.hyperlink,
+        sanitized_hyperlinks,
+    );
     let _ = writer.write_all(cell.symbol.as_bytes());
 }
 
 /// Writes only the cells that changed between the previous and current frame.
-fn cells_visually_equal(
-    sanitized_hyperlinks: &[Option<String>],
-    cell: &CellData,
-    prev_sanitized_hyperlinks: &[Option<String>],
-    prev_cell: &CellData,
-) -> bool {
+fn cells_visually_equal(targets: &mut LinkTargets, cell: &CellData, prev_cell: &CellData) -> bool {
     cell.symbol == prev_cell.symbol
         && cell.fg == prev_cell.fg
         && cell.bg == prev_cell.bg
         && cell.modifier == prev_cell.modifier
-        && sanitized_cell_hyperlink_uri(sanitized_hyperlinks, cell)
-            == sanitized_cell_hyperlink_uri(prev_sanitized_hyperlinks, prev_cell)
+        && targets.same_target(cell, prev_cell)
     // Skip flag is only for ratatui internal use, not visual.
 }
 
 fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameData) {
     let mut last_sgr = String::new(); // Track last SGR to avoid redundant style changes.
     let mut active_hyperlink = None;
-    let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
-    let prev_sanitized_hyperlinks = sanitized_frame_hyperlinks(prev);
+    let mut targets = LinkTargets::new(frame, prev);
 
     for row in 0..frame.height {
         let mut invalidated = 0usize;
@@ -993,12 +1030,7 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
             let prev_cell = &prev.cells[idx];
 
             if !cell.skip
-                && (!cells_visually_equal(
-                    &sanitized_hyperlinks,
-                    cell,
-                    &prev_sanitized_hyperlinks,
-                    prev_cell,
-                ) || invalidated > 0)
+                && (!cells_visually_equal(&mut targets, cell, prev_cell) || invalidated > 0)
                 && to_skip == 0
             {
                 let cursor_position =
@@ -1009,7 +1041,7 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
                     cell,
                     &mut last_sgr,
                     &mut active_hyperlink,
-                    frame,
+                    &targets.current,
                 );
                 next_inline_col = (cell.symbol.is_ascii() && cell_width(cell) == 1)
                     .then_some(col.saturating_add(1));
@@ -2351,5 +2383,71 @@ mod tests {
             output_str.contains("\x1b[1;2H"),
             "cells hidden by a previous halfwidth voiced kana must be redrawn when visible"
         );
+    }
+
+    fn linked_row(len: u16, table_index: impl Fn(u16) -> Option<u32>) -> FrameData {
+        let cells = (0..len)
+            .map(|x| {
+                let mut cell = make_cell("a", 0, 0, 0);
+                cell.hyperlink = table_index(x);
+                cell
+            })
+            .collect();
+        make_frame(len, 1, cells)
+    }
+
+    fn sanitized_so_far() -> usize {
+        TARGETS_SANITIZED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn hrdr25_transport_ansi_sanitizes_each_target_once_not_once_per_cell() {
+        let mut frame = linked_row(500, |_| Some(0));
+        frame
+            .hyperlinks
+            .push(format!("https://a.test/\x1b]{}", "x".repeat(8000)));
+
+        TARGETS_SANITIZED.with(|count| count.set(0));
+        let mut full = Vec::new();
+        blit_frame_to(&mut full, &frame, None);
+        assert_eq!(sanitized_so_far(), 1, "full encode: one table entry");
+        let text = String::from_utf8(full).unwrap();
+        let target = format!("https://a.test/]{}", "x".repeat(8000));
+        assert_eq!(text.matches(&format!("\x1b]8;;{target}\x1b\\")).count(), 1);
+        assert_eq!(
+            text.matches("\x1b]8;;\x1b\\").count(),
+            2,
+            "reset, then close"
+        );
+
+        // A diff builds both tables once and decides equality once per pair.
+        let mut next = frame.clone();
+        next.cells[250].symbol = "b".to_owned();
+        TARGETS_SANITIZED.with(|count| count.set(0));
+        let mut diff = Vec::new();
+        blit_frame_to(&mut diff, &next, Some(&frame));
+        assert_eq!(sanitized_so_far(), 2, "diff encode: one entry per frame");
+        let text = String::from_utf8(diff).unwrap();
+        assert_eq!(text.matches(&format!("\x1b]8;;{target}\x1b\\")).count(), 1);
+        assert!(text.contains('b'));
+    }
+
+    #[test]
+    fn hrdr25_transport_ansi_equal_text_in_different_entries_stays_one_run() {
+        let mut frame = linked_row(6, |x| Some(u32::from(x % 2)));
+        frame.hyperlinks = vec!["https://same.test/".to_owned(); 2];
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.matches("\x1b]8;;https://same.test/\x1b\\").count(), 1);
+
+        // Different text switches the run, and a target that sanitizes to
+        // nothing is not a link at all.
+        frame.hyperlinks = vec!["https://one.test/".to_owned(), "\x1b\x07".to_owned()];
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.matches("\x1b]8;;https://one.test/\x1b\\").count(), 3);
+        assert!(!text.contains("\x1b]8;;\x1b\x07"));
     }
 }
