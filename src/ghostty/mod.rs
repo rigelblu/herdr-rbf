@@ -806,10 +806,24 @@ pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
     Ok(buffer)
 }
 
+/// Unicode White_Space, matching Rust's char::is_whitespace URL boundaries.
+const LINK_BOUNDARIES: &[u32] = &[
+    9, 10, 11, 12, 13, 32, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+    0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+];
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LinkTarget {
     Uri(String),
     Text { text: String, clicked_byte: usize },
+}
+
+/// A plain-text web URL and the visible cells it covers.
+#[derive(Debug)]
+pub(crate) struct ViewportWebLink {
+    /// Shared by every covered cell, so a long target is allocated once.
+    pub uri: std::sync::Arc<str>,
+    pub regions: Vec<crate::api::schema::PaneLinkRegion>,
 }
 
 pub struct Terminal {
@@ -1259,6 +1273,63 @@ impl Terminal {
         Ok(rows)
     }
 
+    /// Whether a text token running past the top or bottom viewport row could
+    /// be, or become, a web link that the viewport alone cannot show.
+    ///
+    /// Only a row that continues a soft wrap past the edge has such a token.
+    /// It matters when the token holds a scheme or is too long to resolve:
+    /// editing visible cells can then make a hidden prefix eligible, or take
+    /// one away. Ordinary wrapped prose is neither.
+    pub(crate) fn viewport_edge_tokens_may_link(&self) -> Result<(bool, bool), Error> {
+        let cols = self.cols()?;
+        let rows = u32::from(self.rows()?);
+        if cols == 0 || rows == 0 {
+            return Ok((false, false));
+        }
+        let top = ghostty_viewport_point(0, 0);
+        let bottom = ghostty_viewport_point(cols - 1, rows - 1);
+        let above = grid_ref_wrap_state(&self.grid_ref(top)?)?.1 && self.token_may_link(top)?;
+        let below =
+            grid_ref_wrap_state(&self.grid_ref(bottom)?)?.0 && self.token_may_link(bottom)?;
+        Ok((above, below))
+    }
+
+    /// The token at a cell is over the resolve budget or contains a web scheme.
+    /// Blank cells and short scheme-free tokens are not.
+    fn token_may_link(&self, point: ffi::GhosttyPoint) -> Result<bool, Error> {
+        let mut clicked = self.grid_ref(point)?;
+        if grid_ref_wide(&clicked)? == CellWide::SpacerTail {
+            clicked.x = clicked.x.saturating_sub(1);
+        }
+        if grid_ref_hyperlink_uri(&clicked)?.is_some() {
+            return Ok(true);
+        }
+        let blank = grid_ref_graphemes(&clicked)?
+            .first()
+            .copied()
+            .and_then(char::from_u32)
+            .is_none_or(char::is_whitespace);
+        if blank {
+            return Ok(false);
+        }
+        let options = ffi::GhosttyTerminalSelectWordOptions {
+            size: mem::size_of::<ffi::GhosttyTerminalSelectWordOptions>(),
+            ref_: clicked,
+            boundary_codepoints: LINK_BOUNDARIES.as_ptr(),
+            boundary_codepoints_len: LINK_BOUNDARIES.len(),
+        };
+        let mut selection = ffi::GhosttySelection::default();
+        let result = unsafe {
+            ffi::ghostty_terminal_select_word_bounded(self.raw, &options, 8192, &mut selection)
+        };
+        if result == ffi::GhosttyResult_GHOSTTY_NO_VALUE {
+            return Ok(true);
+        }
+        result.into_result()?;
+        let text = self.format_selection(&selection, FormatterFormat::Plain, true, false)?;
+        Ok(text.contains("http://") || text.contains("https://"))
+    }
+
     fn viewport_graphemes_and_style(&self, x: u16, y: u32) -> Result<(Vec<u32>, CellStyle), Error> {
         let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
         let graphemes = grid_ref_graphemes(&grid_ref)?;
@@ -1304,16 +1375,11 @@ impl Terminal {
         {
             return Ok(None);
         }
-        // Unicode White_Space, matching Rust's char::is_whitespace URL boundaries.
-        const BOUNDARIES: &[u32] = &[
-            9, 10, 11, 12, 13, 32, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
-            0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
-        ];
         let options = ffi::GhosttyTerminalSelectWordOptions {
             size: mem::size_of::<ffi::GhosttyTerminalSelectWordOptions>(),
             ref_: clicked,
-            boundary_codepoints: BOUNDARIES.as_ptr(),
-            boundary_codepoints_len: BOUNDARIES.len(),
+            boundary_codepoints: LINK_BOUNDARIES.as_ptr(),
+            boundary_codepoints_len: LINK_BOUNDARIES.len(),
         };
         let mut selection = ffi::GhosttySelection::default();
         // Bound work before formatting, even for an unbroken scrollback-sized token.
@@ -1356,18 +1422,33 @@ impl Terminal {
         y: u32,
         resolve: fn(&str, usize) -> Option<std::ops::Range<usize>>,
     ) -> Result<Vec<crate::api::schema::PaneLinkRegion>, Error> {
+        Ok(self
+            .viewport_web_link(x, y, resolve)?
+            .map(|link| link.regions)
+            .unwrap_or_default())
+    }
+
+    /// Resolve the bounded plain-text token at a cell to its complete URL and
+    /// every visible cell it covers. The token is formatted once, not once per
+    /// covered cell, and an over-budget token resolves to nothing.
+    pub(crate) fn viewport_web_link(
+        &self,
+        x: u16,
+        y: u32,
+        resolve: fn(&str, usize) -> Option<std::ops::Range<usize>>,
+    ) -> Result<Option<ViewportWebLink>, Error> {
         let cols = self.cols()?;
         let rows = self.rows()?;
         if x >= cols || y >= u32::from(rows) {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let Some((LinkTarget::Text { text, clicked_byte }, Some(selection))) =
             self.viewport_link_selection(x, y)?
         else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let Some(range) = resolve(&text, clicked_byte) else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let point =
             |grid_ref: &ffi::GhosttyGridRef, clipped: (u16, u32)| -> Result<(u16, u32), Error> {
@@ -1455,7 +1536,10 @@ impl Terminal {
                 byte += len;
             }
         }
-        Ok(regions)
+        let Some(uri) = text.get(range).map(std::sync::Arc::<str>::from) else {
+            return Ok(None);
+        };
+        Ok((!regions.is_empty()).then_some(ViewportWebLink { uri, regions }))
     }
 
     fn grid_ref(&self, point: ffi::GhosttyPoint) -> Result<ffi::GhosttyGridRef, Error> {
@@ -3067,7 +3151,6 @@ impl<'a> RowIter<'a> {
         Ok(dirty)
     }
 
-    #[cfg(windows)]
     pub fn wrap_state(&self) -> Result<(bool, bool), Error> {
         let mut row = 0;
         // SAFETY: row output matches requested row data type.
@@ -3196,6 +3279,13 @@ pub struct CellBasicData {
     pub style: CellStyle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellScanData {
+    pub codepoint: u32,
+    pub wide: CellWide,
+    pub has_hyperlink: bool,
+}
+
 impl Default for CellBasicData {
     fn default() -> Self {
         Self {
@@ -3285,6 +3375,42 @@ impl<'a> RowCellIter<'a> {
             has_hyperlink,
             has_styling,
             style: style.into(),
+        })
+    }
+
+    /// Codepoint, width and link flag of the current cell in one lookup, for
+    /// per-cell scans that need no styling or grapheme text.
+    pub fn scan_data(&self) -> Result<CellScanData, Error> {
+        let raw = self.raw_cell()?;
+        let mut codepoint = 0u32;
+        let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
+        let mut has_hyperlink = false;
+        let keys = [
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CODEPOINT,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK,
+        ];
+        let mut values = [
+            (&mut codepoint as *mut u32).cast::<c_void>(),
+            (&mut wide as *mut ffi::GhosttyCellWide).cast::<c_void>(),
+            (&mut has_hyperlink as *mut bool).cast::<c_void>(),
+        ];
+        let mut written = 0usize;
+        // SAFETY: each output pointer matches the type of its requested key.
+        unsafe {
+            ffi::ghostty_cell_get_multi(
+                raw,
+                keys.len(),
+                keys.as_ptr(),
+                values.as_mut_ptr(),
+                &mut written,
+            )
+            .into_result()?;
+        }
+        Ok(CellScanData {
+            codepoint,
+            wide: CellWide::from_raw(wide),
+            has_hyperlink,
         })
     }
 
@@ -4598,5 +4724,53 @@ mod tests {
         assert!(basic.has_styling);
         assert_eq!(basic.style.fg_color, Some(CellColor::Palette(1)));
         assert!(!basic.has_hyperlink);
+    }
+
+    #[test]
+    fn hrdr25_budget_edge_tokens_flag_only_schemes_and_unresolvable_text() {
+        // Ordinary wrapped prose at both edges: nothing a hidden prefix can decide.
+        let mut terminal = Terminal::new(20, 3, 1024 * 1024).unwrap();
+        terminal.write(format!("{}\r\nx\r\ny\r\nz", "w".repeat(70)).as_bytes());
+        terminal.scroll_viewport_row(1);
+        assert_eq!(
+            terminal.viewport_edge_tokens_may_link().unwrap(),
+            (false, false)
+        );
+        terminal.scroll_viewport_row(0);
+        assert_eq!(
+            terminal.viewport_edge_tokens_may_link().unwrap(),
+            (false, false)
+        );
+
+        // A scheme in the token that continues past the top edge, or the bottom one.
+        let text = format!("https://example.com/{}", "a".repeat(50));
+        let mut terminal = Terminal::new(20, 3, 1024 * 1024).unwrap();
+        terminal.write(format!("{text}\r\nx\r\ny\r\nz").as_bytes());
+        terminal.scroll_viewport_row(1);
+        assert_eq!(
+            terminal.viewport_edge_tokens_may_link().unwrap(),
+            (true, false)
+        );
+        terminal.scroll_viewport_row(0);
+        assert_eq!(
+            terminal.viewport_edge_tokens_may_link().unwrap(),
+            (false, true)
+        );
+
+        // A token past the resolve budget cannot be classified: fail closed.
+        let mut terminal = Terminal::new(80, 10, 1024 * 1024).unwrap();
+        terminal.write("a".repeat(9000).as_bytes());
+        assert_eq!(
+            terminal.viewport_edge_tokens_may_link().unwrap(),
+            (true, false)
+        );
+
+        // A row that does not continue a wrap, or blank cells, never flag.
+        let mut terminal = Terminal::new(20, 3, 1024 * 1024).unwrap();
+        terminal.write(b"https://example.com/a\r\nb");
+        assert_eq!(
+            terminal.viewport_edge_tokens_may_link().unwrap(),
+            (false, false)
+        );
     }
 }

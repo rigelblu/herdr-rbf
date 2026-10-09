@@ -427,7 +427,7 @@ impl TerminalRuntime {
         self.0.collect_dirty_patch_snapshot(area_width, area_height)
     }
 
-    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
+    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, std::sync::Arc<str>)> {
         self.0.visible_hyperlinks(area)
     }
 

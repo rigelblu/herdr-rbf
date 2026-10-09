@@ -60,9 +60,9 @@ mod terminal_effects;
 mod terminal_modes;
 mod terminal_notify;
 mod terminal_theme;
-mod web_url;
 mod ui;
 mod update;
+mod web_url;
 mod workspace;
 mod worktree;
 

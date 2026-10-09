@@ -12,9 +12,7 @@ use crate::layout::PaneId;
 use crate::layout::{find_in_direction, NavDirection};
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 pub(crate) use crate::web_url::{safe_web_url, url_byte_range};
-use crate::web_url::{
-    byte_index_after_cell, byte_index_for_cell, text_cells, url_span_at_column, CellSpan, TextCell,
-};
+use crate::web_url::{text_cells, url_span_at_column, CellSpan, TextCell};
 use crate::workspace::WorkspaceGitStatus;
 
 use super::api_helpers::pane_agent_status;

@@ -10,6 +10,13 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
+#[cfg(test)]
+thread_local! {
+    /// Times a hyperlink target was looked up by its text rather than by the
+    /// identity of the shared projection. Tests assert it counts targets, not cells.
+    static URI_VALUE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -798,7 +805,7 @@ impl FrameData {
     pub fn from_ratatui_buffer_with_hyperlinks(
         buffer: &ratatui::buffer::Buffer,
         cursor: Option<CursorState>,
-        hyperlinks: &[((u16, u16), String, String)],
+        hyperlinks: &[((u16, u16), String, std::sync::Arc<str>)],
     ) -> Self {
         let area = buffer.area;
         let width = area.width;
@@ -806,9 +813,12 @@ impl FrameData {
 
         let mut hyperlink_uris = Vec::<String>::new();
         let mut hyperlink_indices = HashMap::<&str, u32>::new();
-        let mut hyperlink_by_position = HashMap::<(u16, u16), (&str, &str)>::new();
+        // One projected target is shared by every cell it covers, so remember
+        // the table index by identity and hash the URI text once per target.
+        let mut hyperlink_by_identity = HashMap::<usize, u32>::new();
+        let mut hyperlink_by_position = HashMap::<(u16, u16), (&str, &std::sync::Arc<str>)>::new();
         for ((x, y), symbol, uri) in hyperlinks {
-            hyperlink_by_position.insert((*x, *y), (symbol.as_str(), uri.as_str()));
+            hyperlink_by_position.insert((*x, *y), (symbol.as_str(), uri));
         }
         let mut cells = Vec::with_capacity((width as usize) * (height as usize));
         for row in 0..height {
@@ -820,11 +830,19 @@ impl FrameData {
                         if *symbol != cell.symbol() {
                             return None;
                         }
-                        Some(*hyperlink_indices.entry(*uri).or_insert_with(|| {
+                        let identity = std::sync::Arc::as_ptr(uri).cast::<u8>() as usize;
+                        if let Some(index) = hyperlink_by_identity.get(&identity) {
+                            return Some(*index);
+                        }
+                        #[cfg(test)]
+                        URI_VALUE_LOOKUPS.with(|count| count.set(count.get() + 1));
+                        let index = *hyperlink_indices.entry(&***uri).or_insert_with(|| {
                             let index = hyperlink_uris.len() as u32;
-                            hyperlink_uris.push((*uri).to_owned());
+                            hyperlink_uris.push((***uri).to_owned());
                             index
-                        }))
+                        });
+                        hyperlink_by_identity.insert(identity, index);
+                        Some(index)
                     });
                 let mut cell = CellData::from_ratatui_cell(cell);
                 cell.hyperlink = hyperlink;
@@ -842,26 +860,36 @@ impl FrameData {
         }
     }
 
+    /// Every linked cell with its symbol and target, in the projected form.
+    /// One `Arc` is made per target-table entry and cloned for its cells.
+    fn shared_hyperlink_cells(&self) -> Vec<((u16, u16), String, std::sync::Arc<str>)> {
+        let width = self.width;
+        if width == 0 {
+            return Vec::new();
+        }
+        let shared = self
+            .hyperlinks
+            .iter()
+            .map(|uri| std::sync::Arc::<str>::from(uri.as_str()))
+            .collect::<Vec<_>>();
+        self.cells
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| {
+                let uri = shared.get(cell.hyperlink? as usize)?;
+                let x = u16::try_from(index % usize::from(width)).ok()?;
+                let y = u16::try_from(index / usize::from(width)).ok()?;
+                Some(((x, y), cell.symbol.clone(), std::sync::Arc::clone(uri)))
+            })
+            .collect()
+    }
+
     pub(crate) fn replace_from_ratatui_buffer_preserving_effects(
         &mut self,
         buffer: &ratatui::buffer::Buffer,
         cursor: Option<CursorState>,
     ) {
-        let width = self.width;
-        let hyperlinks = if width == 0 {
-            Vec::new()
-        } else {
-            self.cells
-                .iter()
-                .enumerate()
-                .filter_map(|(index, cell)| {
-                    let uri = self.hyperlinks.get(cell.hyperlink? as usize)?;
-                    let x = u16::try_from(index % usize::from(width)).ok()?;
-                    let y = u16::try_from(index / usize::from(width)).ok()?;
-                    Some(((x, y), cell.symbol.clone(), uri.clone()))
-                })
-                .collect::<Vec<_>>()
-        };
+        let hyperlinks = self.shared_hyperlink_cells();
         let graphics = std::mem::take(&mut self.graphics);
         let mut replacement =
             Self::from_ratatui_buffer_with_hyperlinks(buffer, cursor, &hyperlinks);
@@ -3299,7 +3327,7 @@ mod tests {
         let with_links = FrameData::from_ratatui_buffer_with_hyperlinks(
             &buffer,
             None,
-            &[((1, 0), "i".to_owned(), "https://example.com".to_owned())],
+            &[((1, 0), "i".to_owned(), "https://example.com".into())],
         );
         assert_eq!(with_links.cells[1].hyperlink, Some(0));
         assert_eq!(
@@ -3559,5 +3587,87 @@ mod tests {
             self.pos += to_read;
             Ok(to_read)
         }
+    }
+
+    fn link_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut buffer =
+            ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, width, height));
+        for y in 0..height {
+            for x in 0..width {
+                buffer.cell_mut((x, y)).unwrap().set_symbol("a");
+            }
+        }
+        buffer
+    }
+
+    fn lookups() -> usize {
+        URI_VALUE_LOOKUPS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn hrdr25_transport_frame_builder_looks_up_each_shared_target_once() {
+        let buffer = link_buffer(20, 3);
+        let long: std::sync::Arc<str> = format!("https://a.test/{}", "x".repeat(8000)).into();
+        // A distinct allocation with equal text must still deduplicate by value.
+        let twin: std::sync::Arc<str> = (*long).into();
+        let other: std::sync::Arc<str> = "https://b.test/".into();
+        let mut links = Vec::new();
+        for x in 0..20 {
+            links.push(((x, 0), "a".to_owned(), long.clone()));
+            links.push(((x, 1), "a".to_owned(), twin.clone()));
+        }
+        for x in 0..5 {
+            links.push(((x, 2), "a".to_owned(), other.clone()));
+        }
+        // A painted symbol that disagrees with the source drops the link.
+        links.push(((7, 2), "z".to_owned(), other.clone()));
+
+        URI_VALUE_LOOKUPS.with(|count| count.set(0));
+        let frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &links);
+        assert_eq!(
+            lookups(),
+            3,
+            "one text lookup per distinct target allocation"
+        );
+        assert_eq!(frame.hyperlinks, vec![long.to_string(), other.to_string()]);
+        let index = |x: usize, y: usize| frame.cells[y * 20 + x].hyperlink;
+        assert!((0..20).all(|x| index(x, 0) == Some(0) && index(x, 1) == Some(0)));
+        assert!((0..5).all(|x| index(x, 2) == Some(1)));
+        assert_eq!(index(7, 2), None);
+    }
+
+    #[test]
+    fn hrdr25_transport_overlay_rebuild_shares_one_target_per_table_entry() {
+        let mut buffer = link_buffer(8, 2);
+        let mut links = Vec::new();
+        for x in 0..8 {
+            links.push((
+                (x, 0),
+                "a".to_owned(),
+                std::sync::Arc::<str>::from("https://a.test/"),
+            ));
+            links.push((
+                (x, 1),
+                "a".to_owned(),
+                std::sync::Arc::<str>::from("https://b.test/"),
+            ));
+        }
+        let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &links);
+
+        let shared = frame.shared_hyperlink_cells();
+        assert_eq!(shared.len(), 16);
+        let allocations = shared
+            .iter()
+            .map(|(_, _, uri)| std::sync::Arc::as_ptr(uri).cast::<u8>() as usize)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(allocations.len(), 2, "one allocation per table entry");
+
+        // Rebuilding over new text keeps targets only where the symbol matches.
+        buffer.cell_mut((3, 0)).unwrap().set_symbol("q");
+        frame.replace_from_ratatui_buffer_preserving_effects(&buffer, None);
+        assert_eq!(frame.cells[3].hyperlink, None);
+        assert_eq!(frame.cells[2].hyperlink, Some(0));
+        assert_eq!(frame.cells[8].hyperlink, Some(1));
+        assert_eq!(frame.hyperlinks, vec!["https://a.test/", "https://b.test/"]);
     }
 }
