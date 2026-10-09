@@ -29,6 +29,10 @@ impl RetiredDirectGraphics {
     }
 }
 
+/// Whether host OSC 8 links survive mouse capture by default. On macOS the host's link
+/// gesture is Command-click, so host links can't take Herdr's Ctrl-click there.
+pub(super) const KEEP_HOST_LINKS_UNDER_MOUSE_CAPTURE: bool = cfg!(target_os = "macos");
+
 /// State tracking for the thin client.
 pub(super) struct ClientState {
     /// Stateful semantic-frame encoder used when the server sends FrameData.
@@ -42,6 +46,9 @@ pub(super) struct ClientState {
     pub(super) host_theme_updates: Vec<crate::protocol::ClientHostThemeUpdate>,
     pub(super) direct_mouse_capture_preference: bool,
     pub(super) shell_mouse_capture_preference: bool,
+    /// Keep host OSC 8 links while the shell captures the mouse. Starts as
+    /// `KEEP_HOST_LINKS_UNDER_MOUSE_CAPTURE`; tests set it both ways.
+    pub(super) keep_host_links_under_mouse_capture: bool,
     pub(super) direct_keyboard_protocol: crate::terminal_modes::DirectHostKeyboardState,
     pub(super) pane_keyboard_report_all: bool,
     pub(super) keyboard_report_all_active: bool,
@@ -111,6 +118,7 @@ impl ClientState {
             host_theme_updates: Vec::new(),
             direct_mouse_capture_preference: false,
             shell_mouse_capture_preference: false,
+            keep_host_links_under_mouse_capture: KEEP_HOST_LINKS_UNDER_MOUSE_CAPTURE,
             direct_keyboard_protocol: Default::default(),
             pane_keyboard_report_all: false,
             keyboard_report_all_active: false,
@@ -567,7 +575,8 @@ impl ClientState {
         } = frame_data.into();
         // With capture enabled, host OSC 8 can intercept Ctrl-click before plugins.
         // Keep semantic links internally and restore native links when capture is off.
-        if self.shell_mouse_capture_preference {
+        // Where the host's link gesture is Command-click (macOS), host links stay.
+        if self.shell_mouse_capture_preference && !self.keep_host_links_under_mouse_capture {
             frame_data.hyperlinks.clear();
         }
         let frame_data = if self.draw_host_cursor {

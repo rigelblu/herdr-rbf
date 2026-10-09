@@ -527,6 +527,7 @@ async fn run_client_loop(
         host_theme_updates: Vec::new(),
         direct_mouse_capture_preference: attach_escape.is_some() && config.mouse_capture_active,
         shell_mouse_capture_preference: config.mouse_capture_active,
+        keep_host_links_under_mouse_capture: state::KEEP_HOST_LINKS_UNDER_MOUSE_CAPTURE,
         direct_keyboard_protocol: crate::terminal_modes::DirectHostKeyboardState::default(),
         pane_keyboard_report_all: false,
         keyboard_report_all_active: false,

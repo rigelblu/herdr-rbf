@@ -23,7 +23,7 @@ struct Observation {
     geometry: (u16, u16),
     cells: Vec<CellData>,
     text_rows: Vec<crate::ghostty::ScreenTextRow>,
-    links: Vec<((u16, u16), String, String)>,
+    links: Vec<((u16, u16), String, std::sync::Arc<str>)>,
     cursor: TerminalCursorState,
     input: InputState,
     visible: String,

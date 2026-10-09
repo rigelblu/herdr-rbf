@@ -889,6 +889,7 @@ fn styled_client_composition_preserves_pane_hyperlinks() {
             let y = hit.inner_rect.y;
             let mut client = crate::client::state::ClientState::test_new();
             client.draw_host_cursor = draw_host_cursor;
+            client.keep_host_links_under_mouse_capture = false;
             let mut terminal = crate::ghostty::Terminal::new(106, 20, 0).unwrap();
             for (phase, (capture, repaint)) in [
                 (false, false),
@@ -932,6 +933,51 @@ fn styled_client_composition_preserves_pane_hyperlinks() {
             }
         }
     }
+}
+
+#[test]
+fn hrdr25_wrapped_plain_url_keeps_its_complete_host_target_under_mouse_capture() {
+    let rows = ["https://example.test", "/wrapped/path?q=1"];
+    let url = rows.concat();
+    let target: std::sync::Arc<str> = url.as_str().into();
+    let mut links = Vec::new();
+    for (y, row) in rows.iter().enumerate() {
+        for (x, symbol) in row.chars().enumerate() {
+            links.push(((x as u16, y as u16), symbol.to_string(), target.clone()));
+        }
+    }
+    let frame =
+        FrameData::from_ratatui_buffer_with_hyperlinks(&Buffer::with_lines(rows), None, &links);
+    let mut client = crate::client::state::ClientState::test_new();
+    client.shell_mouse_capture_preference = true;
+    client.mouse_capture_active = true;
+    client.keep_host_links_under_mouse_capture = true;
+    let mut output = Vec::new();
+    assert!(client.try_present_frame_to(&mut output, frame));
+
+    assert!(
+        String::from_utf8_lossy(&output).contains(&format!("\x1b]8;;{url}\x1b\\")),
+        "the host gets the complete target while capture keeps host links"
+    );
+    let mut terminal = crate::ghostty::Terminal::new(40, 4, 0).unwrap();
+    terminal.write(&output);
+    for (x, y) in [(0, 0), (19, 0), (0, 1), (16, 1)] {
+        assert_eq!(
+            terminal.viewport_hyperlink_uri(x, y).unwrap(),
+            Some(url.clone()),
+            "host link at ({x}, {y}) must cover the whole wrapped URL"
+        );
+    }
+}
+
+#[test]
+fn host_links_follow_the_platform_policy_under_mouse_capture() {
+    let client = crate::client::state::ClientState::test_new();
+    assert_eq!(
+        client.keep_host_links_under_mouse_capture,
+        cfg!(target_os = "macos"),
+        "only macOS hosts keep OSC 8 links while Herdr captures the mouse"
+    );
 }
 
 #[test]
