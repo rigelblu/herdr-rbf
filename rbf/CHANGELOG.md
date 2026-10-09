@@ -8,6 +8,15 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.13.0 (2026-10-09)
+## 🟠⋯ Added for End Users
+- 2026-10-09 - feat (user need) | Triple-click a terminal row to highlight the whole row, including its blank right margin. Hold the third click and drag to select more whole rows, in the full view or an attached agent tab. Double-click still selects a word, and double-clicking blank space still clears selection (#hrdr-22)
+
+## 🟠⋯ Added for Technical Users
+- 2026-10-09 - feat (technical) | Whole-row selection uses the existing `ui.copy_on_select` setting: release copies when enabled; when disabled, the highlight stays for `Ctrl+C`. Existing copy formatting trims trailing blanks and preserves the selected row boundaries (#hrdr-22)
+
+---
+
 # 🔵⋯ v0.12.0 (2026-10-09)
 ## 🟠⋯ 🚨 Breaking Changes for End Users
 - 2026-10-09 - feat (BREAKING ux) | With the new shell block in `~/.zshrc`, bare `herdr` no longer opens the `default` session at my home folder. It opens the session for the folder I'm in. The old session is still there: `herdr --session default`. Without the new shell block, nothing changes (#hrdr-24)
