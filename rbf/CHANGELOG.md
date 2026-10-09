@@ -8,6 +8,18 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.12.0 (2026-10-09)
+## 🟠⋯ 🚨 Breaking Changes for End Users
+- 2026-10-09 - feat (BREAKING ux) | With the new shell block in `~/.zshrc`, bare `herdr` no longer opens the `default` session at my home folder. It opens the session for the folder I'm in. The old session is still there: `herdr --session default`. Without the new shell block, nothing changes (#hrdr-24)
+
+## 🟠⋯ Added for End Users
+- 2026-10-09 - feat (user need) | When I type `herdr` in a project folder, it opens there instead of in my home folder: this folder's session, in a tab labelled `shell` at this folder. Typing it again brings the same shell back. A subfolder gets its own shell, and a `shell` tab I started an agent in is passed over. A window already showing an agent stays where it is. If it can't open, it prints one reason and `nothing opened. For plain herdr: command herdr`, and never falls back to the old session without saying so (#hrdr-24)
+
+## 🟠⋯ Added for Technical Users
+- 2026-10-09 - feat (technical) | `herdr-agent open` does the work, and the `herdr` function in `~/.zshrc` sends bare `herdr` to it; the block to paste is in the `herdr-agent` README. Every other `herdr` call runs as before. `herdr-agent off`, a terminal that isn't interactive, and a shell already inside herdr all get plain herdr. `herdr-agent check` gains a section for it (#hrdr-24)
+
+---
+
 # 🔵⋯ v0.11.0 (2026-10-07)
 ## 🟠⋯ 🚨 Breaking Changes for End Users
 - 2026-10-07 - feat (BREAKING ux) | herdr now removes a stopped session 3 days after it was last in use, and a removed session can't be restored. The first removal runs a few minutes after the install and takes every stopped session already past 3 days. To keep one, attach to it once before installing. `default` is never removed (#hrdr-19)
