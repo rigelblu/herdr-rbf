@@ -164,6 +164,13 @@ impl ClientShellState {
             self.pending_integration_installs = 0;
             self.pane_scroll_in_flight.clear();
             self.pane_scroll_queued.clear();
+            self.last_pane_click = None;
+            if self.line_selection_gesture.is_some() {
+                self.line_selection_gesture = None;
+                self.selection = None;
+                self.stop_selection_autoscroll();
+                self.selection_highlight_clear_deadline = None;
+            }
         }
     }
 

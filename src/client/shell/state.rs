@@ -817,14 +817,24 @@ pub(super) struct ClientPaneClick {
     pub(super) viewport_row: u16,
     pub(super) col: u16,
     pub(super) at: std::time::Instant,
+    pub(super) count: u8,
+    pub(super) focus_confirmed: bool,
 }
 
 impl ClientPaneClick {
-    pub(super) fn is_double_click_for(&self, next: &Self) -> bool {
-        self.pane_id == next.pane_id
-            && next.at.duration_since(self.at) <= std::time::Duration::from_millis(350)
-            && self.viewport_row.abs_diff(next.viewport_row) <= 1
-            && self.col.abs_diff(next.col) <= 1
+    pub(super) fn is_subsequent_click_for(
+        &self,
+        at: std::time::Instant,
+        viewport_row: u16,
+        col: u16,
+        pane_id: &str,
+    ) -> bool {
+        self.pane_id == pane_id
+            && at
+                .checked_duration_since(self.at)
+                .is_some_and(|d| d <= std::time::Duration::from_millis(350))
+            && self.viewport_row.abs_diff(viewport_row) <= 1
+            && self.col.abs_diff(col) <= 1
     }
 }
 
@@ -965,6 +975,7 @@ pub(crate) struct ClientShellState {
     pub(super) selection_autoscroll_deadline: Option<std::time::Instant>,
     pub(super) selection_highlight_clear_deadline: Option<std::time::Instant>,
     pub(super) word_selection_gesture: Option<ClientWordSelection>,
+    pub(super) line_selection_gesture: Option<ClientLineSelection>,
     pub(super) word_selection_generation: u64,
     pub(super) copy_mode: Option<ClientCopyModeState>,
     pub(super) copy_session_generation: u64,
@@ -1135,6 +1146,7 @@ impl ClientShellState {
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
             word_selection_gesture: None,
+            line_selection_gesture: None,
             word_selection_generation: 0,
             copy_mode: None,
             copy_session_generation: 0,
@@ -1344,6 +1356,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline = None;
         self.selection_highlight_clear_deadline = None;
         self.word_selection_gesture = None;
+        self.line_selection_gesture = None;
         self.copy_mode = None;
         if self.mode == ClientShellMode::Copy {
             self.mode = ClientShellMode::Terminal;
@@ -1509,6 +1522,15 @@ impl ClientShellState {
                 .any(|pane| pane.pane_id == gesture.pane_id)
                 || (gesture.focus_confirmed
                     && focused_pane.is_some_and(|pane_id| pane_id != gesture.pane_id))
+        } else if let Some(gesture) = self.line_selection_gesture.as_mut() {
+            let focused_pane = snapshot.focused_pane_id.as_deref();
+            gesture.focus_confirmed |= focused_pane == Some(gesture.pane_id.as_str());
+            !snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == gesture.pane_id)
+                || (gesture.focus_confirmed
+                    && focused_pane.is_some_and(|pane_id| pane_id != gesture.pane_id))
         } else {
             self.selection.as_ref().is_some_and(|selection| {
                 snapshot.focused_pane_id.as_deref() != Some(selection.pane_id.as_str())
@@ -1524,7 +1546,21 @@ impl ClientShellState {
             self.selection_autoscroll_deadline = None;
             self.selection_highlight_clear_deadline = None;
             self.word_selection_gesture = None;
+            self.line_selection_gesture = None;
             self.last_pane_click = None;
+        }
+        if let Some(click) = self.last_pane_click.as_mut() {
+            let focused_pane = snapshot.focused_pane_id.as_deref();
+            click.focus_confirmed |= focused_pane == Some(click.pane_id.as_str());
+            let pane_closed = !snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == click.pane_id);
+            let focus_moved_away = click.focus_confirmed
+                && focused_pane.is_some_and(|pane_id| pane_id != click.pane_id);
+            if pane_closed || focus_moved_away {
+                self.last_pane_click = None;
+            }
         }
         if let Some(copy_pane_id) = self
             .copy_mode
@@ -1752,6 +1788,7 @@ impl ClientShellState {
             self.selection_autoscroll_deadline = None;
             self.selection_highlight_clear_deadline = None;
             self.word_selection_gesture = None;
+            self.line_selection_gesture = None;
             self.copy_mode = None;
             self.reset_copy_pipeline();
             self.chrome_drag = None;
@@ -1818,11 +1855,35 @@ impl ClientShellState {
                         )
                     }))
         });
+        let click_pane_invalidated = self.last_pane_click.as_ref().is_some_and(|click| {
+            let Some(previous_surface) = self.pane_surface.as_ref() else {
+                return false;
+            };
+            let previous = previous_surface
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == click.pane_id);
+            let next = surface
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == click.pane_id);
+            let (Some(previous), Some(next)) = (previous, next) else {
+                return true;
+            };
+            previous.inner_rect != next.inner_rect
+                || (!previous.mouse_reporting && next.mouse_reporting)
+                || previous.alternate_screen_active != next.alternate_screen_active
+        });
+        if click_pane_invalidated {
+            self.last_pane_click = None;
+        }
         if selection_content_changed || selection_mouse_owner_changed {
             self.word_selection_gesture = None;
+            self.line_selection_gesture = None;
             self.selection = None;
             self.stop_selection_autoscroll();
             self.selection_highlight_clear_deadline = None;
+            self.last_pane_click = None;
             if self.config.attached_terminal
                 && selection_content_changed
                 && !selection_mouse_owner_changed

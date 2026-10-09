@@ -320,6 +320,133 @@ fn attached_terminal_invalidates_changed_or_resized_selection_with_feedback() {
 }
 
 #[test]
+fn attached_terminal_triple_click_line_drag_and_cancellation() {
+    let mouse = |kind, column, row| {
+        RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+
+    // 1. Attached held line drag with copy_on_select = true
+    {
+        let mut config = Config::default();
+        config.ui.copy_on_select = true;
+        let mut state =
+            ClientShellState::new(ClientShellConfig::from_config(&config).with_attached_terminal());
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.set_endpoint_methods(Some(vec!["pane.selection.read_joined".into()]));
+        state.compose(4, 2).expect("attached frame");
+
+        // Triple click on row 0, holding 3rd press
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+
+        // Drag down to row 1
+        state.handle_raw_events(vec![mouse(MouseEventKind::Drag(MouseButton::Left), 1, 1)]);
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (1, 3))
+        );
+
+        // Release 3rd press with copy_on_select = true
+        let released =
+            state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 1)]);
+        assert!(matches!(
+            &released.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(request.method, crate::api::schema::Method::PaneSelectionReadJoined(_))
+        ));
+        assert!(
+            state.selection.is_none(),
+            "dragged line selection clears on release when copy_on_select = true"
+        );
+    }
+
+    // 2. Attached held line drag with copy_on_select = false
+    {
+        let mut config = Config::default();
+        config.ui.copy_on_select = false;
+        let mut state =
+            ClientShellState::new(ClientShellConfig::from_config(&config).with_attached_terminal());
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.set_endpoint_methods(Some(vec!["pane.selection.read_joined".into()]));
+        state.compose(4, 2).expect("attached frame");
+
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Drag(MouseButton::Left), 1, 1)]);
+
+        // Release with copy_on_select = false keeps selection visible
+        let released =
+            state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 1)]);
+        assert!(released.actions.is_empty());
+        assert!(state.selection.is_some());
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (1, 3))
+        );
+
+        // Ctrl+C copies via PaneSelectionReadJoined and clears
+        let copy = state.handle_raw_events(vec![RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        )]);
+        assert!(matches!(
+            &copy.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(request.method, crate::api::schema::Method::PaneSelectionReadJoined(_))
+        ));
+        assert!(state.selection.is_none());
+    }
+
+    // 3. Attached pane resize cancels line selection and shows feedback
+    {
+        let mut config = Config::default();
+        config.ui.copy_on_select = false;
+        let mut state =
+            ClientShellState::new(ClientShellConfig::from_config(&config).with_attached_terminal());
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.compose(4, 2).expect("attached frame");
+
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+        assert!(state.selection.is_some());
+
+        let mut resized = state.pane_surface.clone().expect("pane surface");
+        resized.surface_revision += 1;
+        resized.panes[0].inner_rect.width += 2;
+        state.set_pane_surface(resized);
+
+        assert!(
+            state.selection.is_none(),
+            "attached pane resize must cancel line selection"
+        );
+        assert_eq!(
+            state
+                .copy_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("selection changed · drag again")
+        );
+    }
+}
+
+#[test]
 fn attached_terminal_preserves_selection_for_unrelated_output_and_cancels_during_drag() {
     let mut config = Config::default();
     config.ui.copy_on_select = false;
@@ -440,4 +567,256 @@ fn attached_terminal_retained_selection_ctrl_c_copies_joined_text() {
             if matches!(request.method, crate::api::schema::Method::PaneSelectionReadJoined(_))
     ));
     assert!(state.selection.is_none());
+}
+
+#[test]
+fn attached_terminal_triple_click_line_selection_output_contracts() {
+    let mut config = Config::default();
+    config.ui.copy_on_select = false;
+    let mut state =
+        ClientShellState::new(ClientShellConfig::from_config(&config).with_attached_terminal());
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(4, 2).expect("initial attached frame");
+    let mouse = |kind, column, row| {
+        RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    // Triple click on row 0
+    state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+    state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+    state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+    state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+    state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+    state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+
+    assert!(state.selection.is_some());
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((0, 0), (0, 3))
+    );
+
+    // Unrelated output on row 1 preserves selection
+    let mut unrelated = state.pane_surface.clone().expect("pane surface");
+    unrelated.surface_revision += 1;
+    unrelated.panes[0].content_revision += 2;
+    unrelated.frame.cells[4].symbol = "X".into();
+    state.set_pane_surface(unrelated);
+    assert!(
+        state.selection.is_some(),
+        "unrelated output preserves selection"
+    );
+    assert!(state.copy_feedback.is_none());
+
+    // Selected cells changed on row 0 cancels selection
+    let mut selected = state.pane_surface.clone().expect("pane surface");
+    selected.surface_revision += 1;
+    selected.panes[0].content_revision += 2;
+    selected.frame.cells[0].symbol = "Y".into();
+    state.set_pane_surface(selected);
+    assert!(
+        state.selection.is_none(),
+        "changing selected cells must cancel selection"
+    );
+    assert_eq!(
+        state
+            .copy_feedback
+            .as_ref()
+            .map(|feedback| feedback.message.as_str()),
+        Some("selection changed · drag again")
+    );
+}
+
+#[test]
+fn attached_terminal_stale_word_reply_after_triple_click_release_is_discarded() {
+    let mouse = |kind, column| {
+        RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+
+    // Case 1: copy_on_select = true
+    {
+        let mut config = Config::default();
+        config.ui.copy_on_select = true;
+        let mut state =
+            ClientShellState::new(ClientShellConfig::from_config(&config).with_attached_terminal());
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.set_endpoint_methods(Some(vec![
+            "pane.selection.read".into(),
+            "pane.selection.read_joined".into(),
+        ]));
+        state.compose(4, 2).expect("attached frame");
+
+        // Click 1 (Down + Up)
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1)]);
+
+        // Click 2 (Down) -> triggers word read request
+        let second_down =
+            state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1)]);
+        let word_req_id = second_down.actions.iter().find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => Some(request.id.clone()),
+            _ => None,
+        });
+        assert!(word_req_id.is_some());
+
+        // Before word reply returns, click 2 Up and click 3 Down + Up (triple click)
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1)]);
+        let triple_release =
+            state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1)]);
+        assert!(matches!(
+            &triple_release.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(request.method, crate::api::schema::Method::PaneSelectionReadJoined(_))
+        ));
+
+        // Now the delayed word reply arrives
+        let (_, stale_actions) = state.handle_endpoint_result(
+            "boot-1",
+            &word_req_id.unwrap(),
+            Ok(crate::api::schema::ResponseResult::PaneSelection {
+                pane_id: "pane_1".into(),
+                text: "ab c".into(),
+            }),
+        );
+        assert!(
+            stale_actions.is_empty(),
+            "stale word reply after line selection must not queue copy action"
+        );
+    }
+
+    // Case 2: copy_on_select = false
+    {
+        let mut config = Config::default();
+        config.ui.copy_on_select = false;
+        let mut state =
+            ClientShellState::new(ClientShellConfig::from_config(&config).with_attached_terminal());
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.set_endpoint_methods(Some(vec![
+            "pane.selection.read".into(),
+            "pane.selection.read_joined".into(),
+        ]));
+        state.compose(4, 2).expect("attached frame");
+
+        // Click 1 (Down + Up)
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1)]);
+
+        // Click 2 (Down) -> triggers word read request
+        let second_down =
+            state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1)]);
+        let word_req_id = second_down.actions.iter().find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => Some(request.id.clone()),
+            _ => None,
+        });
+        assert!(word_req_id.is_some());
+
+        // Before word reply returns, click 2 Up and click 3 Down + Up (triple click)
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1)]);
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1)]);
+        assert!(state.selection.is_some());
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 3)),
+            "line selection is preserved when copy_on_select = false"
+        );
+
+        // Now the delayed word reply arrives
+        let (_, stale_actions) = state.handle_endpoint_result(
+            "boot-1",
+            &word_req_id.unwrap(),
+            Ok(crate::api::schema::ResponseResult::PaneSelection {
+                pane_id: "pane_1".into(),
+                text: "ab c".into(),
+            }),
+        );
+        assert!(stale_actions.is_empty());
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 3)),
+            "stale word reply must not replace full row line selection"
+        );
+    }
+}
+
+#[test]
+fn attached_terminal_held_triple_click_selected_cell_mutation_cancels_and_up_does_not_copy() {
+    let mut config = Config::default();
+    config.ui.copy_on_select = true;
+    let mut state =
+        ClientShellState::new(ClientShellConfig::from_config(&config).with_attached_terminal());
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(4, 2).expect("initial attached frame");
+    let mouse = |kind, column, row| {
+        RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    // Click 1 (Down + Up)
+    state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+    state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+    // Click 2 (Down + Up)
+    state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+    state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+    // Click 3 (Down) - held!
+    state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+    assert!(
+        state.line_selection_gesture.is_some(),
+        "line gesture active while held"
+    );
+    assert!(
+        state.selection.is_some(),
+        "line selection active while held"
+    );
+
+    // Selected cells mutated on row 0 while third click is held
+    let mut selected = state.pane_surface.clone().expect("pane surface");
+    selected.surface_revision += 1;
+    selected.panes[0].content_revision += 2;
+    selected.frame.cells[0].symbol = "Y".into();
+    state.set_pane_surface(selected);
+
+    assert!(
+        state.selection.is_none(),
+        "selected cell change cancels line selection"
+    );
+    assert!(
+        state.line_selection_gesture.is_none(),
+        "selected cell change cancels line gesture"
+    );
+    assert!(
+        state.last_pane_click.is_none(),
+        "selected cell change resets click history"
+    );
+    assert_eq!(
+        state
+            .copy_feedback
+            .as_ref()
+            .map(|feedback| feedback.message.as_str()),
+        Some("selection changed · drag again")
+    );
+
+    // Later Up release must NOT copy or trigger endpoint request
+    let released =
+        state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left), 1, 0)]);
+    assert!(
+        released.actions.is_empty(),
+        "mouse Up after held cancellation must not produce copy action"
+    );
 }

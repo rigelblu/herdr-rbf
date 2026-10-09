@@ -353,6 +353,1303 @@ fn client_double_click_selects_word_and_copies_only_after_release() {
     }
 }
 
+#[test]
+fn client_triple_click_selects_full_row_and_copies_only_after_release() {
+    for copy_on_select in [true, false] {
+        let mut state = word_drag_state(copy_on_select);
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+
+        // Click 1
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // Click 2
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // Click 3 (held)
+        let held = word_drag_mouse(&mut state, down, 0, 8);
+        assert!(
+            !held.actions.iter().any(|action| matches!(
+                action,
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(
+                        &request.method,
+                        crate::api::schema::Method::PaneSelectionRead(_)
+                            | crate::api::schema::Method::PaneSelectionReadJoined(_)
+                    )
+            )),
+            "holding third press must not copy"
+        );
+        assert!(
+            state.selection.is_some(),
+            "triple click should create selection"
+        );
+        let selection = state.selection.as_ref().unwrap();
+        assert!(
+            selection.is_in_progress(),
+            "selection must be in progress while held"
+        );
+        assert_eq!(
+            selection.ordered_cells(),
+            ((0, 0), (0, 18)),
+            "triple click must select full visual row (0..width-1)"
+        );
+
+        // Release Click 3
+        let released = word_drag_mouse(&mut state, up, 0, 8);
+        assert!(state.selection.as_ref().unwrap().is_finalized());
+
+        if copy_on_select {
+            assert!(
+                matches!(&released.actions[..], [ClientShellAction::Endpoint { request, .. }]
+                if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(params)
+                    | crate::api::schema::Method::PaneSelectionReadJoined(params)
+                    if params.anchor.row == 0 && params.anchor.col == 0 && params.cursor.row == 0 && params.cursor.col == 18))
+            );
+            let copied = word_row_reply(
+                &mut state,
+                &word_read_id(&released.actions),
+                "alpha bravo charlie",
+            );
+            assert!(
+                matches!(&copied[..], [ClientShellAction::ClipboardWrite(bytes)] if bytes == b"alpha bravo charlie")
+            );
+            assert!(
+                state.selection.is_some(),
+                "selection highlight must flash for 500ms"
+            );
+            assert!(state.tick_copy_feedback(state.selection_highlight_clear_deadline.unwrap()));
+            assert!(
+                state.selection.is_none(),
+                "selection cleared after highlight flash"
+            );
+        } else {
+            assert!(
+                !released.actions.iter().any(|action| matches!(
+                    action,
+                    ClientShellAction::Endpoint { request, .. }
+                        if matches!(
+                            &request.method,
+                            crate::api::schema::Method::PaneSelectionRead(_)
+                                | crate::api::schema::Method::PaneSelectionReadJoined(_)
+                        )
+                )),
+                "manual selection must not auto-copy"
+            );
+            state.tick_copy_feedback(std::time::Instant::now() + std::time::Duration::from_secs(1));
+            assert!(
+                state.selection.is_some(),
+                "manual selection must not expire"
+            );
+
+            // Copy with Ctrl+C
+            let ctrl_c =
+                state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('c'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                ))]);
+            assert!(
+                matches!(&ctrl_c.actions[..], [ClientShellAction::Endpoint { request, .. }]
+                if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(params)
+                    | crate::api::schema::Method::PaneSelectionReadJoined(params)
+                    if params.anchor.row == 0 && params.anchor.col == 0 && params.cursor.row == 0 && params.cursor.col == 18))
+            );
+            assert!(
+                state.selection.is_none(),
+                "Ctrl+C clears selection after copy request"
+            );
+        }
+    }
+}
+
+#[test]
+fn client_triple_click_interval_and_distance_bounds() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // 1. Exact 350ms vs 351ms predicate unit contract
+    let now = std::time::Instant::now();
+    let click = ClientPaneClick {
+        pane_id: "pane_1".into(),
+        viewport_row: 0,
+        col: 8,
+        at: now,
+        count: 2,
+        focus_confirmed: true,
+    };
+    assert!(
+        click.is_subsequent_click_for(now + std::time::Duration::from_millis(350), 0, 8, "pane_1"),
+        "350ms inclusive interval must qualify"
+    );
+    assert!(
+        !click.is_subsequent_click_for(now + std::time::Duration::from_millis(351), 0, 8, "pane_1"),
+        "351ms exclusive interval must not qualify"
+    );
+
+    // 2. Event pipeline interval check: within timeout qualifies, expired resets
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // Click 3 within interval (200ms)
+        state.last_pane_click.as_mut().unwrap().at =
+            std::time::Instant::now() - std::time::Duration::from_millis(200);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.selection.is_some());
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18)),
+            "click within interval must advance to line selection"
+        );
+    }
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // Click 3 expired (>350ms)
+        state.last_pane_click.as_mut().unwrap().at =
+            std::time::Instant::now() - std::time::Duration::from_millis(400);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.selection.is_some());
+        assert!(
+            state.selection.as_ref().unwrap().is_just_click(),
+            "expired interval must reset sequence to single cell anchor"
+        );
+    }
+
+    // 3. Row distance tolerance: abs_diff <= 1 passes, > 1 fails
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // row 1 is distance 1 from row 0 -> passes
+        word_drag_mouse(&mut state, down, 1, 8);
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((1, 0), (1, 18)),
+            "row distance <= 1 qualifies for third click"
+        );
+    }
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // row 2 is distance 2 from row 0 -> fails
+        word_drag_mouse(&mut state, down, 2, 8);
+        assert!(
+            state.selection.as_ref().unwrap().is_just_click(),
+            "row distance > 1 resets sequence to single cell anchor"
+        );
+    }
+
+    // 4. Col distance tolerance: abs_diff <= 1 passes, > 1 fails
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // col 9 is distance 1 from col 8 -> passes
+        word_drag_mouse(&mut state, down, 0, 9);
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18)),
+            "col distance <= 1 qualifies for third click"
+        );
+    }
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // col 10 is distance 2 from col 8 -> fails
+        word_drag_mouse(&mut state, down, 0, 10);
+        assert!(
+            state.selection.as_ref().unwrap().is_just_click(),
+            "col distance > 1 resets sequence to single cell anchor"
+        );
+    }
+
+    // 5. Shift modifier breaks sequence
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        let pane = state.hits.panes[0].clone();
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: down,
+            column: pane.inner_rect.x + 8,
+            row: pane.inner_rect.y,
+            modifiers: KeyModifiers::SHIFT,
+        })]);
+        assert!(
+            state.selection.as_ref().unwrap().is_just_click(),
+            "modified click resets sequence to single cell anchor"
+        );
+        assert!(
+            state.last_pane_click.is_none(),
+            "modified click does not save click state"
+        );
+    }
+}
+
+#[test]
+fn client_triple_click_fourth_click_cycles_to_single_cell() {
+    let mut state = word_drag_state(false);
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // Click 1: single cell anchor
+    word_drag_mouse(&mut state, down, 0, 8);
+    assert!(state.selection.as_ref().unwrap().is_just_click());
+    assert_eq!(state.last_pane_click.as_ref().unwrap().count, 1);
+    word_drag_mouse(&mut state, up, 0, 8);
+
+    // Click 2: word selection
+    let req2 = word_drag_mouse(&mut state, down, 0, 8);
+    assert!(req2
+        .actions
+        .iter()
+        .any(|a| matches!(a, ClientShellAction::Endpoint { .. })));
+    assert_eq!(state.last_pane_click.as_ref().unwrap().count, 2);
+    word_drag_mouse(&mut state, up, 0, 8);
+
+    // Click 3: line selection
+    word_drag_mouse(&mut state, down, 0, 8);
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((0, 0), (0, 18))
+    );
+    assert_eq!(state.last_pane_click.as_ref().unwrap().count, 3);
+    word_drag_mouse(&mut state, up, 0, 8);
+
+    // Click 4: cycles 1/2/3/1 -> resets to single cell anchor
+    word_drag_mouse(&mut state, down, 0, 8);
+    assert!(
+        state.selection.as_ref().unwrap().is_just_click(),
+        "4th click must cycle to single cell anchor"
+    );
+    assert_eq!(state.last_pane_click.as_ref().unwrap().count, 1);
+    word_drag_mouse(&mut state, up, 0, 8);
+
+    // Click 5: advances to word selection (count 2)
+    let req5 = word_drag_mouse(&mut state, down, 0, 8);
+    assert!(req5
+        .actions
+        .iter()
+        .any(|a| matches!(a, ClientShellAction::Endpoint { .. })));
+    assert_eq!(state.last_pane_click.as_ref().unwrap().count, 2);
+    word_drag_mouse(&mut state, up, 0, 8);
+
+    // Click 6: advances to line selection (count 3)
+    word_drag_mouse(&mut state, down, 0, 8);
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((0, 0), (0, 18))
+    );
+    assert_eq!(state.last_pane_click.as_ref().unwrap().count, 3);
+}
+
+#[test]
+fn client_line_selection_vertical_and_reverse_drag() {
+    let mut state = word_drag_state(true);
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let drag = MouseEventKind::Drag(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // Triple click on row 1
+    word_drag_mouse(&mut state, down, 1, 8);
+    word_drag_mouse(&mut state, up, 1, 8);
+    word_drag_mouse(&mut state, down, 1, 8);
+    word_drag_mouse(&mut state, up, 1, 8);
+    word_drag_mouse(&mut state, down, 1, 8);
+
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((1, 0), (1, 18))
+    );
+
+    // Drag down to row 2
+    word_drag_mouse(&mut state, drag, 2, 8);
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((1, 0), (2, 18)),
+        "vertical forward drag extends whole rows downwards"
+    );
+
+    // Drag up to row 0 (reverse drag past anchor row 1)
+    word_drag_mouse(&mut state, drag, 0, 8);
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((0, 0), (1, 18)),
+        "vertical reverse drag extends whole rows upwards"
+    );
+
+    // Horizontal movement on row 0 must never narrow endpoints
+    for col in [0, 5, 12, 18] {
+        word_drag_mouse(&mut state, drag, 0, col);
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (1, 18)),
+            "horizontal drag must not narrow endpoints"
+        );
+    }
+
+    // Drag back to anchor row 1
+    word_drag_mouse(&mut state, drag, 1, 8);
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((1, 0), (1, 18))
+    );
+
+    // Release after drag with copy_on_select:
+    // Dragged line selections are copied and immediately cleared (no 500ms flash)
+    let released = word_drag_mouse(&mut state, up, 1, 8);
+    assert!(
+        matches!(&released.actions[..], [ClientShellAction::Endpoint { request, .. }]
+        if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(params)
+            | crate::api::schema::Method::PaneSelectionReadJoined(params)
+            if params.anchor.row == 1 && params.cursor.row == 1))
+    );
+    assert!(
+        state.selection.is_none(),
+        "dragged line selection clears immediately on release"
+    );
+}
+
+#[test]
+fn client_triple_click_supersedes_delayed_word_reply() {
+    for reply_after_release in [false, true] {
+        let mut state = word_drag_state(true);
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+
+        // Click 1
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // Click 2 (word selection request sent, reply pending)
+        let second = word_drag_mouse(&mut state, down, 0, 8);
+        let word_req_id = word_read_id(&second.actions);
+        word_drag_mouse(&mut state, up, 0, 8);
+
+        // Click 3 pressed before word reply arrives
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18)),
+            "line selection active on 3rd press"
+        );
+
+        if reply_after_release {
+            // Release Click 3 first
+            let release_actions = word_drag_mouse(&mut state, up, 0, 8).actions;
+            assert!(
+                matches!(&release_actions[..], [ClientShellAction::Endpoint { request, .. }]
+                if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(params)
+                    | crate::api::schema::Method::PaneSelectionReadJoined(params)
+                    if params.anchor.col == 0 && params.cursor.col == 18)),
+                "line selection copy must be enqueued on release"
+            );
+
+            // Delayed word reply arrives after release
+            let delayed_actions = word_row_reply(&mut state, &word_req_id, "alpha bravo charlie");
+            assert!(
+                delayed_actions.is_empty(),
+                "delayed word reply arriving after third release must be discarded"
+            );
+        } else {
+            // Delayed word reply arrives while 3rd press is held
+            let delayed_actions = word_row_reply(&mut state, &word_req_id, "alpha bravo charlie");
+            assert!(
+                delayed_actions.is_empty(),
+                "delayed word reply must be discarded and emit no actions"
+            );
+            assert_eq!(
+                state.selection.as_ref().unwrap().ordered_cells(),
+                ((0, 0), (0, 18)),
+                "line selection must not be overwritten by obsolete word reply"
+            );
+
+            // Release Click 3
+            let release_actions = word_drag_mouse(&mut state, up, 0, 8).actions;
+            assert!(
+                matches!(&release_actions[..], [ClientShellAction::Endpoint { request, .. }]
+                if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(params)
+                    | crate::api::schema::Method::PaneSelectionReadJoined(params)
+                    if params.anchor.col == 0 && params.cursor.col == 18)),
+                "only line selection copy must be enqueued"
+            );
+        }
+    }
+}
+
+fn empty_row_and_margin_state() -> ClientShellState {
+    let mut config = Config::default();
+    config.ui.copy_on_select = false;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut pane_surface = surface();
+    let buffer = Buffer::with_lines([
+        "trailing spaces    ",
+        "   leading indent  ",
+        "                   ",
+    ]);
+    pane_surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+    pane_surface.panes[0].rect.width = 19;
+    pane_surface.panes[0].rect.height = 3;
+    pane_surface.panes[0].inner_rect = pane_surface.panes[0].rect;
+    state.set_pane_surface(pane_surface);
+    state.compose(106, 20).expect("composed frame");
+    state
+}
+
+#[test]
+fn client_triple_click_empty_row_and_margin() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // 1. Triple click on row 2 (which is an all-space row)
+    {
+        let mut state = empty_row_and_margin_state();
+        word_drag_mouse(&mut state, down, 2, 5);
+        word_drag_mouse(&mut state, up, 2, 5);
+        word_drag_mouse(&mut state, down, 2, 5);
+        word_drag_mouse(&mut state, up, 2, 5);
+        word_drag_mouse(&mut state, down, 2, 5);
+
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((2, 0), (2, 18)),
+            "triple click on an all-space empty row selects full visual row"
+        );
+    }
+
+    // 2. Triple click on row 1 leading indentation (col 1 is leading whitespace)
+    {
+        let mut state = empty_row_and_margin_state();
+        word_drag_mouse(&mut state, down, 1, 1);
+        word_drag_mouse(&mut state, up, 1, 1);
+        word_drag_mouse(&mut state, down, 1, 1);
+        word_drag_mouse(&mut state, up, 1, 1);
+        word_drag_mouse(&mut state, down, 1, 1);
+
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((1, 0), (1, 18)),
+            "triple click on leading indentation selects full visual row"
+        );
+    }
+
+    // 3. Triple click on blank margin cell inside pane rect (row 0, col 17 trailing space)
+    {
+        let mut state = empty_row_and_margin_state();
+        word_drag_mouse(&mut state, down, 0, 17);
+        word_drag_mouse(&mut state, up, 0, 17);
+        word_drag_mouse(&mut state, down, 0, 17);
+        word_drag_mouse(&mut state, up, 0, 17);
+        word_drag_mouse(&mut state, down, 0, 17);
+
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18)),
+            "triple click on blank margin cell inside pane selects full visual row"
+        );
+    }
+
+    // 4. Word rejection on whitespace at click 2 retains click count 2 so click 3 selects line
+    {
+        let mut state = empty_row_and_margin_state();
+        word_drag_mouse(&mut state, down, 0, 17);
+        word_drag_mouse(&mut state, up, 0, 17);
+
+        // Click 2 requests word bounds
+        let second = word_drag_mouse(&mut state, down, 0, 17);
+        let req_id = word_read_id(&second.actions);
+        // Reply with row text where col 17 is whitespace
+        let cancel_actions = word_row_reply(&mut state, &req_id, "trailing spaces    ");
+        assert!(cancel_actions.is_empty());
+        assert!(
+            state.selection.is_none(),
+            "whitespace rejection cancels word selection"
+        );
+        assert_eq!(
+            state.last_pane_click.as_ref().map(|c| c.count),
+            Some(2),
+            "whitespace rejection retains click count 2"
+        );
+        word_drag_mouse(&mut state, up, 0, 17);
+
+        // Click 3 advances to count 3 and selects line
+        word_drag_mouse(&mut state, down, 0, 17);
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18)),
+            "click 3 after whitespace rejection selects full visual row"
+        );
+    }
+
+    // 5. Click outside inner_rect in margin does nothing
+    {
+        let mut state = empty_row_and_margin_state();
+        let pane = state.hits.panes[0].clone();
+        let margin_click =
+            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: down,
+                column: pane.inner_rect.x + pane.inner_rect.width + 5, // outside inner rect
+                row: pane.inner_rect.y,
+                modifiers: KeyModifiers::empty(),
+            })]);
+        assert!(margin_click.actions.is_empty());
+        assert!(state.last_pane_click.is_none());
+        assert!(state.selection.is_none());
+    }
+}
+
+#[test]
+fn client_line_selection_autoscroll_and_drag() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let drag = MouseEventKind::Drag(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    let mut state = word_drag_state(false);
+    state.hits.panes[0].scroll = Some(crate::pane::ScrollMetrics {
+        max_offset_from_bottom: 10,
+        offset_from_bottom: 5,
+        viewport_rows: 3,
+    });
+    let pane = state.hits.panes[0].clone();
+
+    // Triple click on top row of viewport (row 0, absolute row 5)
+    word_drag_mouse(&mut state, down, 0, 8);
+    word_drag_mouse(&mut state, up, 0, 8);
+    word_drag_mouse(&mut state, down, 0, 8);
+    word_drag_mouse(&mut state, up, 0, 8);
+    word_drag_mouse(&mut state, down, 0, 8);
+
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((5, 0), (5, 18)),
+        "line selection active on row 0"
+    );
+
+    // 1. Drag ABOVE the pane initiates autoscroll even though cursor clamps to row 0
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: drag,
+        column: pane.inner_rect.x + 8,
+        row: pane.inner_rect.y.saturating_sub(2), // above top of pane
+        modifiers: KeyModifiers::empty(),
+    })]);
+
+    assert!(
+        state.selection_autoscroll.is_some(),
+        "outside-pane drag must initiate autoscroll"
+    );
+    assert_eq!(
+        state.selection_autoscroll.as_ref().unwrap().direction,
+        ClientSelectionAutoscrollDirection::Up
+    );
+
+    // Tick autoscroll
+    let deadline = state.selection_autoscroll_deadline.unwrap();
+    let tick = state.tick_selection_autoscroll(deadline);
+    assert!(tick.repaint);
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((1, 0), (5, 18)),
+        "autoscroll up extends line selection upwards"
+    );
+
+    // 2. Drag BELOW the pane initiates autoscroll downwards
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: drag,
+        column: pane.inner_rect.x + 8,
+        row: pane.inner_rect.bottom() + 2, // below bottom of pane
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert_eq!(
+        state.selection_autoscroll.as_ref().unwrap().direction,
+        ClientSelectionAutoscrollDirection::Down
+    );
+
+    // 3. Horizontal drag on selected line keeps full-row endpoints but sets dragged = true
+    word_drag_mouse(&mut state, drag, 0, 15);
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells().0 .1,
+        0,
+        "horizontal movement never narrows start column"
+    );
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells().1 .1,
+        18,
+        "horizontal movement never narrows end column"
+    );
+    assert!(
+        state.line_selection_gesture.as_ref().unwrap().dragged,
+        "horizontal drag sets gesture.dragged = true"
+    );
+
+    // Release stops autoscroll
+    word_drag_mouse(&mut state, up, 0, 15);
+    assert!(state.selection_autoscroll.is_none());
+}
+
+#[test]
+fn client_line_selection_history_invalidation() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // 1. Single click (count 1), release (selection is None). Focus moves away -> last_pane_click cleared
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert!(state.selection.is_none());
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+
+        // Snapshot moves focus to pane_2
+        let mut unfocused = snapshot();
+        unfocused.focused_pane_id = Some("pane_2".into());
+        let mut other_pane = unfocused.panes[0].clone();
+        other_pane.pane_id = "pane_2".into();
+        unfocused.panes.push(other_pane);
+        state.set_snapshot(Box::new(unfocused));
+
+        assert!(
+            state.last_pane_click.is_none(),
+            "focus change must clear last_pane_click even when selection was None"
+        );
+
+        // Next click on pane_1 starts fresh at count 1
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+    }
+
+    // 2. Single click, release. Pane resize -> last_pane_click cleared
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+
+        let mut resized = state.pane_surface.clone().unwrap();
+        resized.surface_revision += 1;
+        resized.panes[0].inner_rect.width += 5;
+        state.set_pane_surface(resized);
+
+        assert!(
+            state.last_pane_click.is_none(),
+            "pane resize must clear last_pane_click even when selection was None"
+        );
+
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+    }
+
+    // 3. Single click, release. Mouse reporting enabled -> last_pane_click cleared
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+
+        let mut reporting = state.pane_surface.clone().unwrap();
+        reporting.surface_revision += 1;
+        reporting.panes[0].mouse_reporting = true;
+        state.set_pane_surface(reporting);
+
+        assert!(
+            state.last_pane_click.is_none(),
+            "mouse reporting enabled must clear last_pane_click"
+        );
+    }
+
+    // 4. Single click, release. Type text -> last_pane_click cleared
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+
+        state.handle_raw_events(vec![RawInputEvent::Text(crate::input::TextCommit::new(
+            "a",
+        ))]);
+        assert!(
+            state.last_pane_click.is_none(),
+            "committed text must clear last_pane_click"
+        );
+
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+    }
+
+    // 5. Count 2 click, release. Escape key -> last_pane_click cleared (next click is count 1)
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(2));
+
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::empty(),
+        ))]);
+        assert!(
+            state.last_pane_click.is_none(),
+            "Escape key must clear last_pane_click"
+        );
+
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(
+            state.last_pane_click.as_ref().map(|c| c.count),
+            Some(1),
+            "next press after typing cancel is count 1, not line selection"
+        );
+    }
+}
+
+#[test]
+fn client_line_selection_cancellation_contracts() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // 1. Focus lost cancels line selection
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.selection.is_some());
+
+        let mut unfocused = snapshot();
+        unfocused.focused_pane_id = Some("pane_other".into());
+        state.set_snapshot(Box::new(unfocused));
+        assert!(
+            state.selection.is_none(),
+            "focus loss must cancel line selection"
+        );
+        assert!(state.line_selection_gesture.is_none());
+    }
+
+    // 2. Typed key input during active line gesture cancels selection and gesture
+    {
+        let mut state = word_drag_state(true);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.line_selection_gesture.is_some());
+
+        // Press 'x' while mouse is still down
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        ))]);
+        assert!(state.selection.is_none(), "key input must clear selection");
+        assert!(
+            state.line_selection_gesture.is_none(),
+            "key input must clear line gesture"
+        );
+
+        // Subsequent mouse Up must not resurrect or copy
+        let released = word_drag_mouse(&mut state, up, 0, 8);
+        assert!(
+            released.actions.is_empty(),
+            "subsequent mouse up must not copy after cancel"
+        );
+        assert!(state.selection.is_none());
+    }
+
+    // 3. Ordinary pane preserves line selection across output
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18))
+        );
+
+        let mut updated = state.pane_surface.clone().unwrap();
+        updated.surface_revision += 1;
+        updated.panes[0].content_revision += 1;
+        state.set_pane_surface(updated);
+
+        assert!(
+            state.selection.is_some(),
+            "ordinary pane preserves live line range across output"
+        );
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18))
+        );
+    }
+}
+
+#[test]
+fn client_triple_click_after_retained_ctrl_c_selects_full_row() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    let mut state = word_drag_state(false);
+    // Click 1 (Down + Up)
+    word_drag_mouse(&mut state, down, 0, 8);
+    word_drag_mouse(&mut state, up, 0, 8);
+    // Click 2 (Down + Up) -> triggers word selection
+    let motion = word_drag_mouse(&mut state, down, 0, 8);
+    let read_id = word_read_id(&motion.actions);
+    word_row_reply(&mut state, &read_id, "alpha bravo charlie");
+    word_drag_mouse(&mut state, up, 0, 8);
+
+    assert!(state.selection.is_some());
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((0, 6), (0, 10))
+    );
+    assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(2));
+
+    // Press Ctrl+C: copies retained selection, clears selection, but PRESERVES last_pane_click
+    let copy = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        crossterm::event::KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    ))]);
+    assert!(copy.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::ClipboardWrite { .. } | ClientShellAction::Endpoint { .. }
+    )));
+    assert!(state.selection.is_none());
+    assert_eq!(
+        state.last_pane_click.as_ref().map(|c| c.count),
+        Some(2),
+        "Ctrl+C copy must preserve stationary count2 click history"
+    );
+
+    // Next Down (click 3) at the same position -> selects whole row!
+    word_drag_mouse(&mut state, down, 0, 8);
+    assert_eq!(
+        state.last_pane_click.as_ref().map(|c| c.count),
+        Some(3),
+        "next click after Ctrl+C advances to count 3"
+    );
+    assert!(state.selection.is_some());
+    assert_eq!(
+        state.selection.as_ref().unwrap().ordered_cells(),
+        ((0, 0), (0, 18)),
+        "count 3 selects full visual row"
+    );
+}
+
+#[test]
+fn client_line_selection_horizontal_drag_discrimination() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let drag = MouseEventKind::Drag(MouseButton::Left);
+    let moved = MouseEventKind::Moved;
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // Case A: same-cell Drag and ordinary Moved remain stationary
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+
+        assert!(state.line_selection_gesture.is_some());
+        assert!(!state.line_selection_gesture.as_ref().unwrap().dragged);
+        assert!(state.last_pane_click.is_some());
+
+        // Same-cell Drag (col 8, row 0)
+        word_drag_mouse(&mut state, drag, 0, 8);
+        assert!(
+            !state.line_selection_gesture.as_ref().unwrap().dragged,
+            "same-cell drag without movement must remain stationary"
+        );
+        assert!(state.last_pane_click.is_some());
+
+        // Ordinary Moved (col 9, row 0) without button down
+        word_drag_mouse(&mut state, moved, 0, 9);
+        assert!(
+            !state.line_selection_gesture.as_ref().unwrap().dragged,
+            "ordinary Moved must remain stationary"
+        );
+        assert!(state.last_pane_click.is_some());
+    }
+
+    // Case B: fresh line gesture -> 1-column horizontal-only Drag marks dragged and resets history
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+
+        assert!(!state.line_selection_gesture.as_ref().unwrap().dragged);
+        assert!(state.last_pane_click.is_some());
+
+        // Drag by 1 column (col 9, row 0)
+        word_drag_mouse(&mut state, drag, 0, 9);
+        assert!(
+            state.line_selection_gesture.as_ref().unwrap().dragged,
+            "one-column horizontal Drag marks dragged = true"
+        );
+        assert!(
+            state.last_pane_click.is_none(),
+            "one-column horizontal Drag resets click history"
+        );
+        assert_eq!(
+            state.selection.as_ref().unwrap().ordered_cells(),
+            ((0, 0), (0, 18)),
+            "horizontal drag preserves full-row endpoints"
+        );
+    }
+}
+
+#[test]
+fn client_line_selection_focus_lag_and_confirmation() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    let mut state = word_drag_state(true);
+
+    // Initial snapshot has focused_pane_id: Some("old_pane") (still-old focus before pane_1 click)
+    let mut initial_snap = snapshot();
+    let mut old_pane = initial_snap.panes[0].clone();
+    old_pane.pane_id = "old_pane".into();
+    initial_snap.panes.push(old_pane);
+    initial_snap.focused_pane_id = Some("old_pane".into());
+    state.set_snapshot(Box::new(initial_snap));
+
+    // Triple click on pane_1 (row 0, col 8), holding third press
+    word_drag_mouse(&mut state, down, 0, 8);
+    word_drag_mouse(&mut state, up, 0, 8);
+    word_drag_mouse(&mut state, down, 0, 8);
+    word_drag_mouse(&mut state, up, 0, 8);
+    word_drag_mouse(&mut state, down, 0, 8);
+
+    assert!(state.line_selection_gesture.is_some());
+    assert!(
+        !state
+            .line_selection_gesture
+            .as_ref()
+            .unwrap()
+            .focus_confirmed
+    );
+
+    // 1a. Snapshot with still-old focus ("old_pane") arrives -> line selection survives!
+    let mut still_old_snap = snapshot();
+    let mut old_pane = still_old_snap.panes[0].clone();
+    old_pane.pane_id = "old_pane".into();
+    still_old_snap.panes.push(old_pane);
+    still_old_snap.focused_pane_id = Some("old_pane".into());
+    state.set_snapshot(Box::new(still_old_snap));
+    assert!(
+        state.line_selection_gesture.is_some(),
+        "line selection must survive still-old pending focus snapshot before confirmation"
+    );
+    assert!(
+        !state
+            .line_selection_gesture
+            .as_ref()
+            .unwrap()
+            .focus_confirmed
+    );
+    assert!(state.selection.is_some());
+
+    // 1b. Snapshot with focused_pane_id: None arrives -> line selection survives!
+    let mut intermediate_snap = snapshot();
+    intermediate_snap.focused_pane_id = None;
+    state.set_snapshot(Box::new(intermediate_snap));
+    assert!(
+        state.line_selection_gesture.is_some(),
+        "line selection must survive focus lag when focused_pane_id is None"
+    );
+    assert!(state.selection.is_some());
+
+    // 2. Snapshot arrives confirming focus on pane_1
+    let mut confirmed_snap = snapshot();
+    confirmed_snap.focused_pane_id = Some("pane_1".into());
+    state.set_snapshot(Box::new(confirmed_snap));
+    assert!(
+        state
+            .line_selection_gesture
+            .as_ref()
+            .unwrap()
+            .focus_confirmed,
+        "focus is now confirmed on pane_1"
+    );
+    assert!(state.selection.is_some());
+
+    // 3. Focus moves away to pane_2 -> cancels line selection
+    let mut other_snap = snapshot();
+    other_snap.focused_pane_id = Some("pane_2".into());
+    let mut other_pane = other_snap.panes[0].clone();
+    other_pane.pane_id = "pane_2".into();
+    other_snap.panes.push(other_pane);
+    state.set_snapshot(Box::new(other_snap));
+
+    assert!(
+        state.selection.is_none(),
+        "focus moving away cancels line selection"
+    );
+    assert!(state.line_selection_gesture.is_none());
+    assert!(state.last_pane_click.is_none());
+
+    // 4. Later Up must not copy
+    let released = word_drag_mouse(&mut state, up, 0, 8);
+    assert!(
+        released.actions.is_empty(),
+        "mouse Up after focus cancellation must not copy"
+    );
+}
+
+#[test]
+fn client_line_selection_zero_geometry_pane_is_no_op() {
+    let mut state = word_drag_state(false);
+
+    // Case 1: width 0, positive height
+    {
+        let mut hit = state.hits.panes[0].clone();
+        hit.inner_rect.width = 0;
+        hit.inner_rect.height = 3;
+
+        let mut outcome = ClientShellInput::default();
+        state.start_line_selection(&hit, 0, 0, &mut outcome);
+        assert!(state.selection.is_none());
+        assert!(state.line_selection_gesture.is_none());
+        assert!(!outcome.repaint);
+    }
+
+    // Case 2: positive width, height 0
+    {
+        let mut hit = state.hits.panes[0].clone();
+        hit.inner_rect.width = 19;
+        hit.inner_rect.height = 0;
+
+        let mut outcome = ClientShellInput::default();
+        state.start_line_selection(&hit, 0, 0, &mut outcome);
+        assert!(state.selection.is_none());
+        assert!(state.line_selection_gesture.is_none());
+        assert!(!outcome.repaint);
+    }
+
+    // Case 3: width 0, height 0
+    {
+        let mut hit = state.hits.panes[0].clone();
+        hit.inner_rect.width = 0;
+        hit.inner_rect.height = 0;
+
+        let mut outcome = ClientShellInput::default();
+        state.start_line_selection(&hit, 0, 0, &mut outcome);
+        assert!(state.selection.is_none());
+        assert!(state.line_selection_gesture.is_none());
+        assert!(!outcome.repaint);
+    }
+}
+
+#[test]
+fn client_line_selection_held_invalidation_branches() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // A. Pane close while held
+    {
+        let mut state = word_drag_state(true);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.line_selection_gesture.is_some());
+
+        let mut closed_snap = snapshot();
+        closed_snap.panes.clear();
+        state.set_snapshot(Box::new(closed_snap));
+        assert!(state.selection.is_none());
+        assert!(state.line_selection_gesture.is_none());
+
+        let released = word_drag_mouse(&mut state, up, 0, 8);
+        assert!(released.actions.is_empty());
+
+        // Next Down starts at count 1
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+    }
+
+    // B. Child mouse reporting enabled while held
+    {
+        let mut state = word_drag_state(true);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.line_selection_gesture.is_some());
+
+        let mut reporting = state.pane_surface.clone().unwrap();
+        reporting.surface_revision += 1;
+        reporting.panes[0].mouse_reporting = true;
+        state.set_pane_surface(reporting);
+        assert!(state.selection.is_none());
+        assert!(state.line_selection_gesture.is_none());
+        assert!(state.last_pane_click.is_none());
+
+        let released = word_drag_mouse(&mut state, up, 0, 8);
+        assert!(released.actions.is_empty());
+
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+    }
+
+    // C. Popup appears while held (preserving 19x3 pane geometry)
+    {
+        let mut state = word_drag_state(true);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.line_selection_gesture.is_some());
+
+        let mut popup_surface = state.pane_surface.clone().unwrap();
+        popup_surface.surface_revision += 1;
+        popup_surface.popup = surface_with_popup().popup;
+        state.set_pane_surface(popup_surface);
+        assert!(state.selection.is_none());
+        assert!(state.line_selection_gesture.is_none());
+        assert!(state.last_pane_click.is_none());
+
+        let released = word_drag_mouse(&mut state, up, 0, 8);
+        assert!(released.actions.is_empty());
+    }
+
+    // D. Endpoint disconnect while held
+    {
+        let mut state = word_drag_state(true);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert!(state.line_selection_gesture.is_some());
+
+        // Inactive endpoint disconnect does NOT cancel active line selection
+        let unrelated_endpoint = crate::client::endpoint::ClientEndpointId::Ssh(
+            crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        );
+        state.mark_endpoint_disconnected(&unrelated_endpoint);
+        assert!(
+            state.line_selection_gesture.is_some(),
+            "unrelated endpoint disconnect must not cancel active line selection"
+        );
+
+        // Active endpoint disconnect cancels line selection and click history
+        state.mark_endpoint_disconnected(&ClientEndpointId::Local);
+        assert!(state.selection.is_none());
+        assert!(state.line_selection_gesture.is_none());
+        assert!(state.last_pane_click.is_none());
+
+        let released = word_drag_mouse(&mut state, up, 0, 8);
+        assert!(released.actions.is_empty());
+    }
+}
+
+#[test]
+fn client_active_disconnect_resets_click_history_and_preserves_reconnect_selection() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+    let unrelated_endpoint = crate::client::endpoint::ClientEndpointId::Ssh(
+        crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+    );
+
+    // 1. Stationary count 1 disconnect -> reconnect -> next Down starts at count 1
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+
+        // Unrelated endpoint disconnect preserves click history
+        state.mark_endpoint_disconnected(&unrelated_endpoint);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+
+        // Active endpoint disconnect resets click history
+        state.mark_endpoint_disconnected(&ClientEndpointId::Local);
+        assert!(state.last_pane_click.is_none());
+
+        // Reconnect endpoint
+        state.set_endpoint_status(
+            &ClientEndpointId::Local,
+            crate::client::endpoint::ClientEndpointStatus::Online,
+        );
+
+        // Next Down starts at count 1 (not count 2)
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+    }
+
+    // 2. Stationary count 2 disconnect -> reconnect -> next Down starts at count 1
+    {
+        let mut state = word_drag_state(false);
+        word_drag_mouse(&mut state, down, 0, 8);
+        word_drag_mouse(&mut state, up, 0, 8);
+        let motion = word_drag_mouse(&mut state, down, 0, 8);
+        let read_id = word_read_id(&motion.actions);
+        word_row_reply(&mut state, &read_id, "alpha bravo charlie");
+        word_drag_mouse(&mut state, up, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(2));
+        assert!(state.selection.is_some(), "count 2 resolved word selection");
+
+        // Active endpoint disconnect resets click history but preserves retained word selection
+        state.mark_endpoint_disconnected(&ClientEndpointId::Local);
+        assert!(state.last_pane_click.is_none());
+        assert!(
+            state.selection.is_some(),
+            "reconnect word selection is preserved across disconnect"
+        );
+
+        // Reconnect endpoint
+        state.set_endpoint_status(
+            &ClientEndpointId::Local,
+            crate::client::endpoint::ClientEndpointStatus::Online,
+        );
+
+        // Next Down starts at count 1 (not count 3)
+        word_drag_mouse(&mut state, down, 0, 8);
+        assert_eq!(state.last_pane_click.as_ref().map(|c| c.count), Some(1));
+    }
+}
+
 fn word_drag_state(copy_on_select: bool) -> ClientShellState {
     let mut config = Config::default();
     config.ui.copy_on_select = copy_on_select;
