@@ -171,7 +171,7 @@ async fn hrdr25_incremental_unlinked_surface_gains_replaces_and_loses_wrapped_li
     assert!(!retained, "replacing a link needs the complete renderer");
     assert_url_linked(&server, &second);
     let replaced = committed_frame(&server);
-    assert!(!replaced.hyperlinks.iter().any(|target| *target == first));
+    assert!(!replaced.hyperlinks.contains(&first));
     let diff = encoder.encode(&replaced, false);
     assert_eq!(count(&diff.bytes, &osc8_open(&second)), 1);
     assert_eq!(count(&diff.bytes, &osc8_open(&first)), 0);
