@@ -11,6 +11,10 @@ use crate::layout::PaneId;
 #[cfg(test)]
 use crate::layout::{find_in_direction, NavDirection};
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
+pub(crate) use crate::web_url::{safe_web_url, url_byte_range};
+use crate::web_url::{
+    byte_index_after_cell, byte_index_for_cell, text_cells, url_span_at_column, CellSpan, TextCell,
+};
 use crate::workspace::WorkspaceGitStatus;
 
 use super::api_helpers::pane_agent_status;
@@ -1032,33 +1036,6 @@ pub(super) fn url_from_link_target(target: crate::ghostty::LinkTarget) -> Option
     }
 }
 
-pub(crate) fn safe_web_url(url: &str) -> Option<&str> {
-    (url.starts_with("http://") || url.starts_with("https://")).then_some(url)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TextCell {
-    ch: char,
-    start_col: u16,
-    end_col: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CellSpan {
-    start: usize,
-    end: usize,
-}
-
-impl CellSpan {
-    fn contains(self, idx: usize) -> bool {
-        idx >= self.start && idx <= self.end
-    }
-
-    fn columns(self, cells: &[TextCell]) -> (u16, u16) {
-        (cells[self.start].start_col, cells[self.end].end_col)
-    }
-}
-
 /// Finds the terminal display-column bounds for the token under a double-click.
 ///
 /// The algorithm first maps text to terminal cells so wide characters and
@@ -1084,16 +1061,6 @@ fn url_at_byte(text: &str, clicked_byte: usize) -> Option<&str> {
     text.get(range)
 }
 
-pub(super) fn url_byte_range(text: &str, clicked_byte: usize) -> Option<std::ops::Range<usize>> {
-    let clicked_idx = text.get(..clicked_byte)?.chars().count();
-    let cells = text_cells(text);
-    let span = url_span_at_column(&cells, clicked_idx)?;
-    let start = byte_index_for_cell(text, span.start);
-    let end = byte_index_after_cell(text, span.end);
-    safe_web_url(text.get(start..end)?)?;
-    Some(start..end)
-}
-
 fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
     if is_word_separator(cells[clicked_idx].ch) {
         return None;
@@ -1112,108 +1079,10 @@ fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSp
     trim_token_edges(cells, CellSpan { start, end }).filter(|span| span.contains(clicked_idx))
 }
 
-fn text_cells(row: &str) -> Vec<TextCell> {
-    let mut next_col = 0u16;
-    row.chars()
-        .map(|ch| {
-            let width = u16::from(crate::ghostty::unicode_codepoint_width(ch as u32));
-            let start_col = if width == 0 {
-                next_col.saturating_sub(1)
-            } else {
-                next_col
-            };
-            if width > 0 {
-                next_col = next_col.saturating_add(width);
-            }
-            TextCell {
-                ch,
-                start_col,
-                end_col: next_col.saturating_sub(1),
-            }
-        })
-        .collect()
-}
-
 fn cell_index_at_column(cells: &[TextCell], col: u16) -> Option<usize> {
     cells
         .iter()
         .position(|cell| cell.start_col <= col && col <= cell.end_col)
-}
-
-fn byte_index_for_cell(row: &str, cell_idx: usize) -> usize {
-    row.char_indices()
-        .nth(cell_idx)
-        .map(|(idx, _)| idx)
-        .unwrap_or(row.len())
-}
-
-fn byte_index_after_cell(row: &str, cell_idx: usize) -> usize {
-    row.char_indices()
-        .nth(cell_idx.saturating_add(1))
-        .map(|(idx, _)| idx)
-        .unwrap_or(row.len())
-}
-
-fn url_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
-    let mut start = 0;
-    while start < cells.len() {
-        if starts_with_chars(&cells[start..], "http://")
-            || starts_with_chars(&cells[start..], "https://")
-        {
-            let mut end = start;
-            while end + 1 < cells.len() && !cells[end + 1].ch.is_whitespace() {
-                end += 1;
-            }
-            if clicked_idx >= start && clicked_idx <= end {
-                let span = trim_url_edges(cells, CellSpan { start, end })?;
-                return span.contains(clicked_idx).then_some(span);
-            }
-            start = end + 1;
-        } else {
-            start += 1;
-        }
-    }
-    None
-}
-
-fn trim_url_edges(cells: &[TextCell], span: CellSpan) -> Option<CellSpan> {
-    let start = span.start;
-    let mut end = span.end;
-    while start <= end && should_trim_trailing_url_cell(cells, start, end) {
-        if end == 0 {
-            return None;
-        }
-        end -= 1;
-    }
-    (start <= end).then_some(CellSpan { start, end })
-}
-
-fn should_trim_trailing_url_cell(cells: &[TextCell], start: usize, end: usize) -> bool {
-    match cells[end].ch {
-        '"' | '\'' | '`' | '.' | ',' | ';' | ':' | '!' | '?' => true,
-        ')' => !trailing_url_closer_is_balanced(cells, start, end, '(', ')'),
-        ']' => !trailing_url_closer_is_balanced(cells, start, end, '[', ']'),
-        '}' => !trailing_url_closer_is_balanced(cells, start, end, '{', '}'),
-        _ => false,
-    }
-}
-
-fn trailing_url_closer_is_balanced(
-    cells: &[TextCell],
-    start: usize,
-    end: usize,
-    open: char,
-    close: char,
-) -> bool {
-    let mut balance = 0i32;
-    for cell in &cells[start..end] {
-        if cell.ch == open {
-            balance += 1;
-        } else if cell.ch == close {
-            balance -= 1;
-        }
-    }
-    balance > 0
 }
 
 fn quoted_path_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
@@ -1256,13 +1125,6 @@ fn is_escaped(cells: &[TextCell], idx: usize) -> bool {
         cursor -= 1;
     }
     slashes % 2 == 1
-}
-
-fn starts_with_chars(cells: &[TextCell], prefix: &str) -> bool {
-    prefix
-        .chars()
-        .enumerate()
-        .all(|(idx, expected)| cells.get(idx).is_some_and(|cell| cell.ch == expected))
 }
 
 fn is_word_separator(ch: char) -> bool {
