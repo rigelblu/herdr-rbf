@@ -10,6 +10,8 @@ mod surface_delta_tests;
 mod surface_interest_tests;
 #[path = "terminal_attach_title.rs"]
 mod terminal_attach_title_tests;
+#[path = "wrapped_links.rs"]
+mod wrapped_links_tests;
 
 fn client_shell_projection(
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
