@@ -50,6 +50,11 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - When `ui.copy_on_select` is false, Ctrl+C (or Cmd+C if forwarded) copies the retained selection
 - If selected cells change during selection or the pane resizes, the selection clears with a notice: `selection changed · drag again`
 
+## 🟠⋯ Wrapped web links
+- HTTP and HTTPS addresses that wrap across terminal rows remain one complete clickable link in the full view and attached agent tabs
+- Use the host terminal’s link gesture: in cmux, hold Command while hovering or clicking any wrapped row. The underline covers the link and the browser receives its complete address
+- Display wrapping is supported; a hard newline ends a plain-text address. Explicit hyperlinks keep their original target
+
 ## 🟠⋯ Whole-line selection on triple-click
 - Triple unmodified left click in an ordinary pane or attached agent tab synchronously selects the entire clicked visual row (columns 0 through pane width minus one)
 - Holding the third click and dragging vertically extends inclusive whole visual rows in either direction; horizontal movement never narrows row endpoints
