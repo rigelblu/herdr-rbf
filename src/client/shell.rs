@@ -21,6 +21,7 @@ mod global_menu;
 mod graphics;
 mod input;
 mod input_source;
+mod line_selection;
 mod link_hover;
 mod mobile;
 mod mouse;
@@ -37,6 +38,7 @@ mod surface_patch;
 mod text_editor;
 mod word_selection;
 mod worktrees;
+use line_selection::ClientLineSelection;
 use text_editor::TextEditor;
 use word_selection::ClientWordSelection;
 

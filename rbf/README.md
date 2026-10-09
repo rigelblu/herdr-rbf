@@ -50,6 +50,13 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - When `ui.copy_on_select` is false, Ctrl+C (or Cmd+C if forwarded) copies the retained selection
 - If selected cells change during selection or the pane resizes, the selection clears with a notice: `selection changed · drag again`
 
+## 🟠⋯ Whole-line selection on triple-click
+- Triple unmodified left click in an ordinary pane or attached agent tab synchronously selects the entire clicked visual row (columns 0 through pane width minus one)
+- Holding the third click and dragging vertically extends inclusive whole visual rows in either direction; horizontal movement never narrows row endpoints
+- Double-click word/token selection and whitespace cancellation stay unchanged
+- Automatic copy follows `ui.copy_on_select`: when true, copies on release with a brief stationary highlight flash; when false, selection is retained for `Ctrl+C` (or `Cmd+C` when forwarded by the host)
+- Retains existing live-buffer selection in ordinary panes across output; ordinary pane resize clears selection silently, while attached agent tabs show the `selection changed · drag again` notice when selected cells change or the attached pane resizes
+
 ## 🟠⋯ Agents that outlive the terminal (herdr-agent)
 - In a project folder, bare `herdr` opens this folder's herdr session, in a shell here: the session that holds the project's agents, in a tab called `shell`. Type it there again and you get the same shell back. `command herdr` is plain herdr for one call. `herdr-agent off` switches bare `herdr` back to plain herdr. `herdr --session default` still opens the old session
 - Type `claude`, `codex`, `pi` or `agy` in a cmux tab and the agent runs inside this checkout's herdr session, shown in that tab. Closing the tab, or quitting or restarting cmux, doesn't stop it
