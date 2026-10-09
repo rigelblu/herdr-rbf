@@ -64,6 +64,7 @@ mod terminal_theme;
 mod thread_spawn;
 mod ui;
 mod update;
+mod web_url;
 mod workspace;
 mod worktree;
 

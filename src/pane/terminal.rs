@@ -17,6 +17,10 @@ use crate::protocol::CellData;
 
 #[cfg(test)]
 mod migration_tests;
+#[cfg(test)]
+mod web_link_profile;
+#[cfg(test)]
+mod web_link_tests;
 #[cfg(windows)]
 mod windows_recent_fallback;
 
