@@ -77,7 +77,7 @@ fn hrdr25_boundaries_http_and_https_cover_one_and_several_rows() {
     assert_links(&one_row, &[(0, 4, 30)], url);
 
     let plain = "http://example.com/a?b=c#d";
-    let one_row = Source::new(80, 4, format!("{plain}").as_bytes());
+    let one_row = Source::new(80, 4, plain.as_bytes());
     assert_links(&one_row, &[(0, 0, 25)], plain);
 
     let wrapped = Source::new(12, 5, url.as_bytes());
