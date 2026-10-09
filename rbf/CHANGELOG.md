@@ -8,6 +8,12 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.13.1 (2026-10-09)
+## 🟠⋯ Fixed for End Users
+- 2026-10-09 - fix (user need) | Web links that wrap across terminal rows in Herdr underline across every line and open the complete browser address when clicked, including in attached agent tabs (#hrdr-25)
+
+---
+
 # 🔵⋯ v0.13.0 (2026-10-09)
 ## 🟠⋯ Added for End Users
 - 2026-10-09 - feat (user need) | Triple-click a terminal row to highlight the whole row, including its blank right margin. Hold the third click and drag to select more whole rows, in the full view or an attached agent tab. Double-click still selects a word, and double-clicking blank space still clears selection (#hrdr-22)
