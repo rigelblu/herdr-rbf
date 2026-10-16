@@ -8,6 +8,15 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.14.0 (2026-10-16)
+## 🟠⋯ Added for End Users
+- 2026-10-16 - feat (user need) | Find a running agent by workspace name, tab number, directory and process age in `herdr-agent ps` and the attach picker. The title appears before the directory, and pane IDs are hidden from the table (#herdr-20)
+
+## 🟠⋯ Added for Technical Users
+- 2026-10-16 - feat (technical) | `AGE` shows local agent-process uptime when identifiable, with `-` for unavailable or ambiguous data. It is a snapshot when listing opens, not conversation age. Explicit attachment still accepts a session and pane ID; use `herdr --session <session> pane list` to find IDs (#herdr-20)
+
+---
+
 # 🔵⋯ v0.13.1 (2026-10-09)
 ## 🟠⋯ Fixed for End Users
 - 2026-10-09 - fix (user need) | Web links that wrap across terminal rows in Herdr underline across every line and open the complete browser address when clicked, including in attached agent tabs (#hrdr-25)
