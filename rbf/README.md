@@ -66,7 +66,9 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - In a project folder, bare `herdr` opens this folder's herdr session, in a shell here: the session that holds the project's agents, in a tab called `shell`. Type it there again and you get the same shell back. `command herdr` is plain herdr for one call. `herdr-agent off` switches bare `herdr` back to plain herdr. `herdr --session default` still opens the old session
 - Type `claude`, `codex`, `pi` or `agy` in a cmux tab and the agent runs inside this checkout's herdr session, shown in that tab. Closing the tab, or quitting or restarting cmux, doesn't stop it
 - A running session is never removed. Once a session has stopped, after a reboot for example, herdr removes it 3 days after it was last in use — see "Sessions I've stopped using are removed" below
-- `herdr-agent ps` lists what runs, and `herdr-agent attach` shows one in any tab. For a second view, another tab or a phone over SSH, use `herdr session attach <session>`
+- `herdr-agent ps` and the `herdr-agent attach` picker show session, workspace name, tab number, agent, status, age, terminal title and working directory. Select a row to open that agent in this tab
+- `AGE` is the local agent process's uptime, such as `12m`, `1h33m` or `2d4h`; `-` means its process could not be identified or timed. It is captured when listing opens and resets when the process restarts, even when it resumes an older conversation
+- Pane IDs are hidden in the table. For explicit `herdr-agent attach <session> <pane>`, find IDs with `herdr --session <session> pane list`. For another view in a second tab or on a phone over SSH, use `herdr session attach <session>`
 - Resuming a session that's already running attaches to it instead of starting a second copy
 - After a cmux restart, a tab that showed an agent, or ran `herdr --remote <host>`, shows it again. claude's status and notifications follow the tab showing it
 - It installs with the fork (below) into `~/.local`, so it runs from the copy and not the checkout. It needs two blocks in `~/.zshenv` and one in `~/.zshrc`, given in `rbf/src/herdr-agent/share/herdr-agent/README.md`
