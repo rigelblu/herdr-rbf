@@ -23,7 +23,7 @@
 #   herdr-agent open                 this folder's herdr session, in a shell here (bare herdr runs this)
 #   herdr-agent on | off | status   the switch; off runs every agent right here
 #   herdr-agent session [dir]       the herdr session a folder's agents go to
-#   herdr-agent ps [session]        the agents in herdr: session, pane, agent, status, tab name
+#   herdr-agent ps [session]        agents: session, workspace, tab number, agent, status, age, title, directory
 #                                   (see one: herdr --session S pane read PANE --source visible)
 #   herdr-agent attach [session pane]  show a running agent in this terminal (none given: pick one);
 #                                   it moves here from any other tab showing it
@@ -688,21 +688,77 @@ cmd_status() {
   fi
 }
 
-# every agent in these herdr sessions as an aligned table: session, pane, agent, status,
-# and the tab name (the title the agent gives its terminal, which cmux shows on the tab)
+# Location and status for each agent. The picker carries an opaque session/pane
+# key beside the display, so spaces and duplicate titles never choose the target.
 agent_table() {
-  local session
-  {
-    print -r -- $'SESSION\tPANE\tAGENT\tSTATUS\tTAB NAME'
+  local session workspaces tabs panes pane agent pid age ages rows picker=0
+  local -A age_by_pid
+  while read -r pid age; do
+    [[ $pid == <-> ]] && age_by_pid[$pid]=$age
+  done < <(ps -axo pid=,etime= 2>/dev/null)
+  [[ ${1:-} == --picker ]] && { picker=1; shift; }
+  rows=$({
+    print -r -- $'-\tSESSION\tWORKSPACE\tTAB\tAGENT\tSTATUS\tAGE\tTAB NAME\tCWD'
     for session in "$@"; do
-      h $session pane list 2>/dev/null | jq -r --arg s $session '
+      workspaces=$(h $session workspace list 2>/dev/null |
+        jq -ce '.result.workspaces | if type == "array" then . else [] end') || workspaces='[]'
+      tabs=$(h $session tab list 2>/dev/null |
+        jq -ce '.result.tabs | if type == "array" then . else [] end') || tabs='[]'
+      panes=$(h $session pane list 2>/dev/null) || continue
+      ages=$(
+        while IFS=$'\t' read -r pane agent; do
+          pid=$(h $session pane process-info --pane "$pane" 2>/dev/null |
+            jq -r --arg agent "$agent" '
+              .result.process_info as $info
+              | [$info.foreground_processes[]?
+                  | select(any([.name, .argv0, .argv[0]][];
+                      . != null and (split("/")[-1] == $agent)))] as $matches
+              | ([$matches[] | select(.pid == $info.foreground_process_group_id)][0]
+                 // [$matches[] | select(.pid == $info.shell_pid)][0]
+                 // (if ($matches | length) == 1 then $matches[0] else null end))
+              | .pid // empty') || continue
+          [[ $pid == <-> && -n ${age_by_pid[$pid]:-} ]] || continue
+          print -r -- "$pane"$'\t'"${age_by_pid[$pid]}"
+        done < <(jq -r '.result.panes[] | select(.agent != null) | [.pane_id, .agent] | @tsv' <<<$panes)
+      )
+      ages=$(print -r -- "$ages" | jq -Rn '
+        [inputs | split("\t") | select(length == 2) | {key: .[0], value: .[1]}] | from_entries')
+      jq -r --arg s $session --argjson ages "$ages" \
+        --argjson workspaces "$workspaces" --argjson tabs "$tabs" '
+        def age:
+          try (
+            if . == null then "-" else
+              split("-") as $parts
+              | ($parts[-1] | split(":") | map(tonumber)) as $clock
+              | ((if ($parts | length) == 2 then ($parts[0] | tonumber) * 86400 else 0 end)
+                 + (if ($clock | length) == 3 then $clock[0] * 3600 + $clock[1] * 60 + $clock[2]
+                    elif ($clock | length) == 2 then $clock[0] * 60 + $clock[1]
+                    else error("invalid elapsed time") end)) as $seconds
+              | if $seconds < 60 then "<1m"
+                elif $seconds < 3600 then "\(($seconds / 60) | floor)m"
+                elif $seconds < 86400 then "\(($seconds / 3600) | floor)h\((($seconds % 3600) / 60) | floor)m"
+                else "\(($seconds / 86400) | floor)d\((($seconds % 86400) / 3600) | floor)h" end
+            end
+          ) catch "-";
+        def display:
+          if . == null or . == "" then "-" else tostring end
+          | tojson | .[1:-1];
         .result.panes[]
         | select(.agent != null)
-        | [$s, .pane_id, .agent, (.agent_status // "-"),
-           ((.terminal_title_stripped // "") | if . == "" then "-" else . end)]
-        | @tsv'
+        | . as $pane
+        | ([$workspaces[] | select(.workspace_id == $pane.workspace_id)][0].label) as $workspace
+        | ([$tabs[] | select(.tab_id == $pane.tab_id)][0].number) as $tab
+        | ([$s, .pane_id] | tojson | @base64) as $key
+        | [$s, $workspace, $tab, .agent, .agent_status, ($ages[.pane_id] | age), .terminal_title_stripped, .cwd]
+        | map(display) | join("\t") | $key + "\t" + .' <<<$panes
     done
-  } | column -t -s $'\t'
+  })
+  if (( picker )); then
+    paste <(print -r -- "$rows" | cut -f1) \
+      <(print -r -- "$rows" | cut -f2- | column -t -s $'\t')
+  else
+    print -r -- "$rows" | cut -f2- | column -t -s $'\t'
+  fi
 }
 
 cmd_ps() {
@@ -762,7 +818,7 @@ restore_tab() {
 # with no arguments, pick one of the running agents; --restore: see restore_tab
 cmd_attach() {
   local session=${1:-} pane=${2:-} choice terminal
-  local -a sessions lines words
+  local -a sessions target
   (( $+commands[jq] )) || die "attach needs jq"
   inside_herdr && die "this terminal is already inside herdr; use herdr's own navigation"
   [[ -t 0 && -t 1 ]] || die "attach needs an interactive terminal"
@@ -770,21 +826,20 @@ cmd_attach() {
   sessions=(${(f)"$(running_sessions)"})
   if [[ -z $session ]]; then
     (( $+commands[fzf] )) ||
-      die "picking needs fzf; or name one: herdr-agent attach <session> <pane> (see: herdr-agent ps)"
+      die "picking needs fzf; or name one: herdr-agent attach <session> <pane> (pane IDs: herdr --session <session> pane list)"
     (( $#sessions )) || die "no herdr session is running"
-    choice=$(agent_table $sessions | fzf --header-lines=1 --reverse --height=40% --prompt='attach to: ') ||
-      exit 1
-    # through an array: ${${(f)x}[1]} of a single line is its first character
-    lines=(${(f)choice})
-    words=(${(s: :)lines[1]})
-    session=${words[1]} pane=${words[2]}
+    choice=$(agent_table --picker $sessions | fzf --delimiter=$'\t' --with-nth=2.. \
+      --header-lines=1 --reverse --height=40% --prompt='attach to: ') || exit 1
+    target=("${(@f)$(print -r -- "${choice%%$'\t'*}" | jq -Rr '@base64d | fromjson | .[]')}")
+    (( $#target == 2 )) || die "invalid picker selection"
+    session=${target[1]} pane=${target[2]}
   elif [[ -z $pane ]]; then
-    die "usage: herdr-agent attach [<session> <pane>] (see: herdr-agent ps)"
+    die "usage: herdr-agent attach [<session> <pane>] (pane IDs: herdr --session <session> pane list)"
   fi
   (( ${sessions[(Ie)$session]} )) || die "no running herdr session named $session (see: herdr session list)"
   terminal=$(h $session pane list 2>/dev/null |
     jq -r --arg p $pane '.result.panes[] | select(.pane_id == $p) | .terminal_id')
-  [[ -n $terminal ]] || die "no pane $pane in herdr session $session (see: herdr-agent ps $session)"
+  [[ -n $terminal ]] || die "no pane $pane in herdr session $session (see: herdr --session $session pane list)"
   attach $session $terminal $pane takeover
 }
 
