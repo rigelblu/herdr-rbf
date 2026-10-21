@@ -708,3 +708,181 @@ async fn terminal_attach_title_scale_profile() {
         "median at 15x0 must be under 1 µs (1,000 ns), got {m15_0:.1} ns"
     );
 }
+
+#[tokio::test]
+async fn hrdr28_title_only_changes_repaint_viewed_agent_tabs_not_hidden_or_spinner_updates() {
+    let (mut server, (p1, t1), (p2, t2)) = setup_two_terminal_server();
+    let t1_id = server.terminal_id_by_string(&t1).unwrap();
+    let t2_id = server.terminal_id_by_string(&t2).unwrap();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&t1_id)
+        .unwrap()
+        .detected_agent = Some(crate::detect::Agent::Codex);
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&t2_id)
+        .unwrap()
+        .detected_agent = Some(crate::detect::Agent::Codex);
+    server.app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+    server.app.state.sidebar_agents.rows_by_agent.clear();
+    let (_control, _render) = connect_matching_test_shell(&mut server, 91);
+    server.render_and_stream();
+    server
+        .app
+        .terminal_runtimes
+        .get(&t1_id)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;\xe2\x9c\xb3 old title\x07");
+    server.app.render_dirty.request_terminal_title(p1);
+    assert!(server.app.sync_pending_terminal_titles().stripped_changed);
+    let sources = server.app.render_dirty.take().terminal_title_sources;
+    let (repaint, _) = server.sync_terminal_title_sources(&sources);
+    assert!(
+        repaint,
+        "an OSC-only title must publish a new shell projection"
+    );
+    server.render_and_stream();
+    server
+        .app
+        .terminal_runtimes
+        .get(&t1_id)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;\xe2\xa0\x8b old title\x07");
+    assert!(
+        !server
+            .sync_terminal_title_sources(&std::collections::HashSet::from([p1]))
+            .0,
+        "spinner-only changes must not repaint"
+    );
+    server
+        .app
+        .terminal_runtimes
+        .get(&t2_id)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;hidden title\x07");
+    assert!(
+        !server
+            .sync_terminal_title_sources(&std::collections::HashSet::from([p2]))
+            .0,
+        "hidden workspace must not repaint"
+    );
+    server
+        .app
+        .terminal_runtimes
+        .get(&t1_id)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;\x07");
+    assert!(
+        server
+            .sync_terminal_title_sources(&std::collections::HashSet::from([p1]))
+            .0,
+        "cleared title must publish"
+    );
+    server.render_and_stream();
+    server.clients.get_mut(&91).unwrap().shell_surface_active = false;
+    server
+        .app
+        .terminal_runtimes
+        .get(&t1_id)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;inactive endpoint\x07");
+    assert!(
+        !server
+            .sync_terminal_title_sources(&std::collections::HashSet::from([p1]))
+            .0,
+        "inactive endpoint must not repaint"
+    );
+    let client = server.clients.get_mut(&91).unwrap();
+    client.shell_surface_active = true;
+    client.shell_presentation =
+        Some(crate::server::clients::ClientShellPresentation::AttachedTerminal { terminal_id: t1 });
+    assert!(
+        !server
+            .sync_terminal_title_sources(&std::collections::HashSet::from([p1]))
+            .0,
+        "attached terminal has no tab chrome"
+    );
+
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+#[ignore = "manual title-batch fanout profile"]
+async fn hrdr28_title_batch_fanout_profile() {
+    for count in [1, 15] {
+        for clients in [1, 4] {
+            let mut server = test_headless_server();
+            let mut workspace = crate::workspace::Workspace::test_new("profile");
+            for _ in 1..count {
+                workspace.test_add_tab(None);
+            }
+            let panes = workspace
+                .tabs
+                .iter()
+                .map(|tab| tab.root_pane)
+                .collect::<Vec<_>>();
+            server.app.state.workspaces = vec![workspace];
+            server.app.state.active = Some(0);
+            server.app.state.ensure_test_terminals();
+            for pane_id in &panes {
+                let terminal_id = server.app.state.workspaces[0]
+                    .terminal_id(*pane_id)
+                    .unwrap()
+                    .clone();
+                let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+                terminal.detected_agent = Some(crate::detect::Agent::Codex);
+                terminal.set_terminal_title(Some("session".into()));
+                server.app.terminal_runtimes.insert(
+                    terminal_id,
+                    crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                        120,
+                        24,
+                        b"populated pane",
+                    ),
+                );
+            }
+            let mut receivers = Vec::new();
+            for id in 1..=clients {
+                receivers.push(connect_test_shell(&mut server, id, 120, 23));
+            }
+            server.render_and_stream();
+            let sources = panes
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let started = std::time::Instant::now();
+            for _ in 0..1000 {
+                assert!(!std::hint::black_box(
+                    server.viewed_agent_title_changed(&sources)
+                ));
+            }
+            let unchanged = started.elapsed().as_secs_f64() * 1000.0;
+            for pane_id in &panes {
+                let terminal_id = server.app.state.workspaces[0]
+                    .terminal_id(*pane_id)
+                    .unwrap()
+                    .clone();
+                server
+                    .app
+                    .state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .unwrap()
+                    .set_terminal_title(Some("renamed session".into()));
+            }
+            let started = std::time::Instant::now();
+            for _ in 0..1000 {
+                assert!(std::hint::black_box(
+                    server.viewed_agent_title_changed(&sources)
+                ));
+            }
+            println!("hrdr28 title_batch panes={count} clients={clients} unchanged_us={unchanged:.2} changed_us={:.2}", started.elapsed().as_secs_f64() * 1000.0);
+            shutdown_test_runtimes(&mut server);
+        }
+    }
+}

@@ -1524,6 +1524,7 @@ impl ClientShellState {
                             || left.zoomed != right.zoomed
                     })
                 || render::tab_bar_status_width(current) != render::tab_bar_status_width(&snapshot)
+                || render::tab_title_widths_changed(current, &snapshot)
         });
         if self
             .snapshot
