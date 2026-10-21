@@ -36,6 +36,12 @@ This directory holds this flavour's docs, scripts, and version metadata. The ups
 - A successful reconstruction says how many wrapped lines it rejoined. Ordinary copies still say `copied to clipboard`
 - To always copy the drawn rows, set `join_agent_wraps = false` under `[ui.copy]` in `~/.config/herdr/config.toml`, then run `herdr server reload-config` on that machine. For a remote pane, edit and reload the remote server's config
 
+## 🟠⋯ Session names on Herdr tabs
+- Herdr tabs show their saved label followed by the current agent session title, such as `codex · my session`. Renaming the conversation in the agent updates that title
+- Manual tab labels stay visible. This changes the displayed text without renaming the saved tab
+- A tab with one agent uses that agent’s title. A tab with multiple agents uses the focused agent’s title; an unfocused ambiguous tab keeps its saved label
+- A missing, blank or duplicate title adds no extra text. Existing cmux title forwarding keeps working
+
 ## 🟠⋯ Agent names on attached tabs
 - A window running `herdr terminal attach` shows its pane's title, status symbol included (`✳ my session`). cmux names the tab from it, so a tab showing a herdr-held agent reads the same as the agent running directly in cmux
 - The name follows every change: renames, and the symbol while the agent works
