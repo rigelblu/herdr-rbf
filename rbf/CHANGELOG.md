@@ -8,6 +8,12 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.15.0 (2026-10-20)
+## 🟠⋯ Added for End Users
+- 2026-10-20 - feat | Find a renamed agent conversation on its Herdr tab. The tab shows its saved label followed by the current session title, such as `codex · my session`, and keeps manual tab names intact (#hrdr-28)
+
+---
+
 # 🔵⋯ v0.14.0 (2026-10-16)
 ## 🟠⋯ Added for End Users
 - 2026-10-16 - feat (user need) | Find a running agent by workspace name, tab number, directory and process age in `herdr-agent ps` and the attach picker. The title appears before the directory, and pane IDs are hidden from the table (#herdr-20)
