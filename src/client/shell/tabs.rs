@@ -21,13 +21,8 @@ pub(crate) fn render_tab_bar(
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
-    let desired_widths = tabs
-        .iter()
-        .map(|tab| {
-            let label = tab_label(tab);
-            display_width(&label).saturating_add(4).max(MIN_TAB_WIDTH)
-        })
-        .collect::<Vec<_>>();
+    let names = tab_names(snapshot);
+    let desired_widths = names.iter().map(|name| tab_width(name)).collect::<Vec<_>>();
     let content = tab_bar_content_area(snapshot, area);
     let mouse_chrome = config.mouse_capture;
     let new_tab_width = if mouse_chrome { NEW_TAB_WIDTH } else { 0 };
@@ -92,7 +87,7 @@ pub(crate) fn render_tab_bar(
     let mut first_visible = None;
     let mut last_visible = None;
     for (index, tab) in tabs.iter().enumerate().skip(*tab_scroll) {
-        let name = tab_label(tab);
+        let name = &names[index];
         let desired = desired_widths[index];
         let remaining = tab_right.saturating_sub(x);
         let width = desired.min(remaining);
@@ -114,7 +109,7 @@ pub(crate) fn render_tab_bar(
         } else {
             Style::default().fg(palette.overlay0).bg(palette.surface0)
         };
-        let padding = width.saturating_sub(display_width(&name));
+        let padding = width.saturating_sub(display_width(name));
         let left = padding / 2;
         let text = format!(
             "{empty:left$}{name}{empty:right_padding$}",
@@ -371,11 +366,90 @@ fn max_tab_scroll(widths: &[u16], available: u16) -> usize {
     start
 }
 
-fn tab_label(tab: &ClientShellTab) -> String {
+pub(in crate::client::shell) fn tab_title_widths_changed(
+    previous: &ClientShellSnapshot,
+    next: &ClientShellSnapshot,
+) -> bool {
+    let previous = tab_names(previous);
+    let next = tab_names(next);
+    previous.len() != next.len()
+        || previous
+            .iter()
+            .zip(&next)
+            .any(|(left, right)| tab_width(left) != tab_width(right))
+}
+
+fn tab_width(name: &str) -> u16 {
+    display_width(name).saturating_add(4).max(MIN_TAB_WIDTH)
+}
+
+fn tab_names(snapshot: &ClientShellSnapshot) -> Vec<String> {
+    let titles = tab_session_titles(snapshot);
+    snapshot
+        .tabs
+        .iter()
+        .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
+        .map(|tab| {
+            let title = titles
+                .get(&(tab.workspace_id.as_str(), tab.tab_id.as_str()))
+                .and_then(|titles| titles.focused.or(titles.sole));
+            tab_label(tab, title)
+        })
+        .collect()
+}
+
+struct TabSessionTitles<'a> {
+    sole: Option<&'a str>,
+    focused: Option<&'a str>,
+}
+
+fn tab_session_titles(
+    snapshot: &ClientShellSnapshot,
+) -> HashMap<(&str, &str), TabSessionTitles<'_>> {
+    use std::collections::hash_map::Entry;
+
+    let mut titles = HashMap::new();
+    for agent in &snapshot.agents {
+        if Some(agent.workspace_id.as_str()) != snapshot.focused_workspace_id.as_deref() {
+            continue;
+        }
+        let title = agent
+            .terminal_title_stripped
+            .as_deref()
+            .filter(|title| !title.trim().is_empty());
+        let focused = agent.focused.then_some(title).flatten();
+        match titles.entry((agent.workspace_id.as_str(), agent.tab_id.as_str())) {
+            Entry::Vacant(entry) => {
+                entry.insert(TabSessionTitles {
+                    sole: title,
+                    focused,
+                });
+            }
+            Entry::Occupied(mut entry) => {
+                let titles = entry.get_mut();
+                titles.sole = None;
+                // A focused agent without a title must not reveal a different agent's title.
+                if agent.focused {
+                    titles.focused = focused;
+                }
+            }
+        }
+    }
+    titles
+}
+
+fn tab_label(tab: &ClientShellTab, title: Option<&str>) -> String {
+    let label = match title {
+        Some(title) if title != tab.label && !tab.label.is_empty() => {
+            format!("{} · {title}", tab.label)
+        }
+        Some(title) if tab.label.is_empty() => title.to_owned(),
+        _ => tab.label.clone(),
+    };
     if tab.zoomed {
-        format!("{} Z", tab.label)
+        format!("{label} Z")
     } else {
-        tab.label.clone()
+        label
     }
 }
 

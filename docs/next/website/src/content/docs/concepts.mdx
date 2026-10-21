@@ -15,6 +15,10 @@ A workspace owns tabs and panes. Its sidebar state rolls up from the agents insi
 
 A tab is a layout inside a workspace. Use tabs to separate views like `agents`, `logs`, `server`, or `review`.
 
+When a tab contains one recognized agent, its current terminal title appears beside the tab name: for example, `codex · review auth flow`. The title follows changes made inside the agent; the saved tab name stays the same, including names you assign manually. If the title is empty or matches the tab name, the tab shows just its name.
+
+For tabs with multiple agents, Herdr shows the focused agent's title when one is identified. Otherwise it keeps the tab name alone. This display needs no configuration and does not rename the agent session.
+
 Tabs are addressable from the CLI and socket API.
 
 ## Pane
