@@ -263,3 +263,5 @@ mod popup_focus_projection;
 mod sidebar_shape_wiring;
 mod startup_overlays;
 mod tab_bar_hidden;
+
+mod tab_session_titles;

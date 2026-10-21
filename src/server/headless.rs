@@ -589,11 +589,11 @@ impl HeadlessServer {
                     needs_full_render = true;
                     crate::render_prof::event("full_render_cause.generic_dirty");
                 }
-                let (sidebar_title_changed, outer_title_synced) =
+                let (chrome_title_changed, outer_title_synced) =
                     self.sync_terminal_title_sources(&render_request.terminal_title_sources);
-                if sidebar_title_changed {
+                if chrome_title_changed {
                     needs_full_render = true;
-                    crate::render_prof::event("full_render_cause.terminal_title_sidebar");
+                    crate::render_prof::event("full_render_cause.terminal_title_chrome");
                 }
                 if needs_full_render && !outer_title_synced {
                     self.sync_window_title();
@@ -1506,8 +1506,8 @@ impl HeadlessServer {
     }
 
     /// Pulls only titles reported dirty by the PTY parser. A focused pane title
-    /// is forwarded as an independent client side effect; only sidebar title
-    /// tokens require a UI render.
+    /// is forwarded as an independent client side effect. Sidebar title tokens
+    /// and changed titles in a viewed workspace also update shell chrome.
     fn sync_terminal_title_sources(
         &mut self,
         sources: &HashSet<crate::layout::PaneId>,
@@ -1534,9 +1534,61 @@ impl HeadlessServer {
             self.sync_terminal_attach_titles();
         }
         (
-            self.app.terminal_title_sidebar_changed(&changes),
+            self.app.terminal_title_sidebar_changed(&changes)
+                || self.viewed_agent_title_changed(sources),
             outer_title_synced,
         )
+    }
+
+    fn viewed_agent_title_changed(&self, sources: &HashSet<crate::layout::PaneId>) -> bool {
+        if sources.is_empty() {
+            return false;
+        }
+        let snapshots = self
+            .clients
+            .values()
+            .filter(|client| {
+                matches!(client.mode, ClientConnectionMode::ClientShell)
+                    && client.writer.is_some()
+                    && client.shell_surface_active
+                    && client.shell_location().is_some()
+            })
+            .filter_map(|client| client.shell_snapshot.as_ref())
+            .collect::<Vec<_>>();
+        if snapshots.is_empty() {
+            return false;
+        }
+
+        let mut titles = HashMap::new();
+        for pane_id in sources {
+            let Some((ws_idx, pane)) = self.app.find_pane(*pane_id) else {
+                continue;
+            };
+            let workspace_id = self.app.public_workspace_id(ws_idx);
+            if !snapshots.iter().any(|snapshot| {
+                snapshot.focused_workspace_id.as_deref() == Some(workspace_id.as_str())
+            }) {
+                continue;
+            }
+            let Some(terminal) = self.app.state.terminals.get(&pane.attached_terminal_id) else {
+                continue;
+            };
+            if !terminal.is_agent_terminal() {
+                continue;
+            }
+            let Some(public_id) = self.app.public_pane_id(ws_idx, *pane_id) else {
+                continue;
+            };
+            titles.insert(public_id, terminal.terminal_title_stripped());
+        }
+        snapshots.iter().any(|snapshot| {
+            snapshot.agents.iter().any(|agent| {
+                Some(agent.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref()
+                    && titles.get(&agent.pane_id).is_some_and(|title| {
+                        title.as_deref() != agent.terminal_title_stripped.as_deref()
+                    })
+            })
+        })
     }
 
     fn foreground_window_title_target(&self) -> Option<crate::ui::TabSurfaceTarget> {
