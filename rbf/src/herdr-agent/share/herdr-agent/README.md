@@ -145,20 +145,81 @@ If it cannot open, it prints two lines and exits 1. The first line is one of:
 The second line is always:
 - `herdr-agent: nothing opened. For plain herdr: command herdr`
 
-## The two notes
+## Recovery and hook notes
 
-Both are written by `attach()`, and they point opposite ways.
+The tab and pane notes are written by `attach()`, and point opposite ways. A Claude
+launch also records its original profile, before the first attach.
 
 | Note | Path | Answers |
 | --- | --- | --- |
 | tab → pane | `$state_dir/tabs/<surface>` | which pane to show when cmux restarts this tab |
 | pane → tab | `$state_dir/panes/<session>.<pane>` | which tab an agent's hooks should reach now |
+| Claude launch | `$state_dir/claude-launch/<encoded session and terminal>.json` | which profile started this terminal |
 
-`$state_dir` is `$XDG_STATE_HOME/herdr-agent`, else `~/.local/state/herdr-agent`. The pane note
-is three tab-separated fields: `<surface>\t<workspace>\t<attach pid>`. The tab note has two
-shapes, both tab-separated. A local one is `<session>\t<pane>\t<agent>\t<agent session>`. A
-remote one is the herdr arguments the tab ran, starting with `--remote`. No herdr session can
-be named `--remote`, so the two can't be confused.
+`$state_dir` is `$HERDR_AGENT_STATE_DIR`, else `$XDG_STATE_HOME/herdr-agent`, else
+`~/.local/state/herdr-agent`. The pane note remains three tab-separated fields:
+`<surface>\t<workspace>\t<attach pid>`. Non-Claude local tab notes remain
+`<session>\t<pane>\t<agent>\t<agent session>`. Remote tab notes remain the herdr arguments,
+starting with `--remote`.
+
+New Claude tab notes are version 1 JSON: `session`, `pane`, `terminal_id`, `agent`,
+conversation `id`, and `claude_config`. Launch records use the same version and selector,
+keyed by session and `original_terminal_id`; an attach never replaces that binding.
+New JSON files are mode 0600 in mode 0700 directories, and are published atomically.
+They contain profile selectors, never OAuth tokens, API keys, or the full environment.
+If saving fails, the pane stays running and attachable, with a warning that automatic
+recovery is unavailable. The old tab record is invalidated so it cannot resume a different
+conversation. If even invalidation fails, the launcher keeps the pane alive and asks you to
+repair the record directory before attaching this tab.
+
+### Parallel Claude profiles
+
+Start each account with its own `CLAUDE_CONFIG_DIR`, directly or through `cswap run`.
+Shared history, memory, skills and agents can keep their existing shared paths. The launcher
+records the exact explicit directory, or that the variable was unset. Claude continues to
+manage authentication within that profile. Attaching from a different account's shell does
+not change the saved profile. The selector identifies a directory, not an immutable email:
+replacing credentials inside that profile changes the account Claude will use.
+
+For a running pane, restore follows its opaque terminal ID even if its public pane ID moved.
+A reused pane ID or an unverified identity after a native handoff refuses automatic recovery.
+For a gone pane, restore runs the usual `claude --resume <id>` wrapper with the saved selector.
+It does not replay the original flags, alter account credentials, or move history or memory.
+
+Automatic recovery stops with advice when the record is invalid, the saved profile directory
+is inaccessible, or the profile was never recorded. An explicitly empty or relative directory,
+or an original launch using `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or
+`CLAUDE_CODE_OAUTH_TOKEN`, records an unknown profile. Those authentication overrides in the
+restoring shell also stop a dead-pane recovery: retry from a shell without them, or resume
+manually with the intended account.
+
+For example, if your shell already defines `claude1` and `claude2` for the two cswap
+profiles, resume deliberately from the project folder with `claude1 --resume <id>` or
+`claude2 --resume <id>`, choosing the intended account. The launcher does not add these aliases.
+
+Older tab notes still attach a living Claude pane. Once that pane is gone they refuse to
+guess its account. A live attach can save a known launch binding, when one exists. Rolling
+back to an older launcher preserves remote and other-agent notes; it cannot automatically
+resume new Claude JSON notes.
+
+Run the launcher regression fixtures without model requests:
+
+```bash
+RBF_TEST_ROOT=<scratch> bash rbf/scripts/herdr-agent-restore.test.sh profile-pair
+```
+
+The existing `herdr-agent check` TSV assertion exercises Pi's tab note; that format
+remains unchanged. Claude JSON recovery is covered by the separate harness above.
+
+The script lists its other cases at the top. `live-auth-status` additionally needs the real
+Claude executable, two already logged-in profile paths, and their expected emails in the
+`REAL_CLAUDE_BIN` and `HERDR_TEST_PROFILE_A/B` / `HERDR_TEST_EXPECTED_EMAIL_A/B` environment
+variables. It compares native `claude auth status --json` before and after restoration;
+it sends no prompt and does not prove that a conversation was resumed by Claude.
+Set `HERDR_TEST_CLAUDE_WRAPPER` to the installed cmux Claude wrapper to include it in the
+execution path, with its hooks disabled so the fixture sends no cmux requests. The native
+case retains the real home and OS user variables for macOS authentication; Herdr and XDG
+state remain isolated.
 
 ## Remote herdr tabs
 
