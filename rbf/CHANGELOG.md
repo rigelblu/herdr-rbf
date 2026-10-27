@@ -8,6 +8,12 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.15.1 (2026-10-27)
+## 🟠⋯ Fixed for End Users
+- 2026-10-27 - fix | Restore each Claude conversation with its original account profile after its Herdr pane is gone. Unknown profiles or uncertain terminal identity stop with recovery guidance; older dead-pane records require deliberate account-specific resume (#hrdr-29)
+
+---
+
 # 🔵⋯ v0.15.0 (2026-10-20)
 ## 🟠⋯ Added for End Users
 - 2026-10-20 - feat | Find a renamed agent conversation on its Herdr tab. The tab shows its saved label followed by the current session title, such as `codex · my session`, and keeps manual tab names intact (#hrdr-28)
