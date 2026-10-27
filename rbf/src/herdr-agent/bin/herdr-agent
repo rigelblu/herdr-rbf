@@ -478,15 +478,205 @@ claim_launch() {
   export CMUX_AGENT_LAUNCH_CWD=$PWD
 }
 
-# Notes which herdr pane this cmux tab shows, under the tab's ID, which survives a cmux
-# restart, plus the pane's agent and session in case the pane is gone by then (a reboot)
+# The launch profile belongs to the terminal, not to the shell viewing it. These
+# private records contain selectors only; authentication remains Claude's job.
+claude_json_checks='
+  def plain: type == "string" and (test("[\u0000-\u001f\u007f]") | not);
+  def identifier: plain and length > 0;
+  def config:
+    type == "object" and (
+      (.kind == "unset" and keys == ["kind"]) or
+      (.kind == "explicit" and keys == ["kind", "value"] and
+        (.value | type == "string" and startswith("/") and index("\u0000") == null)) or
+      (.kind == "unknown" and keys == ["kind", "reason"] and
+        (.reason == "unrecorded" or .reason == "unsupported-context" or
+         .reason == "auth-override" or .reason == "write-failed"))
+    );
+'
+
+# Recovery treats unavailable or malformed observations as uncertainty. Normal
+# interactive commands keep their existing best-effort lookup behavior.
+claude_running_sessions() {
+  local response
+  response=$(herdr_cli session list --json 2>/dev/null) || return 1
+  jq -ser "$claude_json_checks
+    if length == 1 and (.[0] | type == \"object\") then .[0].sessions
+    else error(\"invalid session response\") end
+    | if type == \"array\" and all(.[];
+      type == \"object\" and (.name | identifier) and (.running | type == \"boolean\"))
+    then [.[] | select(.running) | .name] else error(\"invalid sessions\") end
+    | join(\"\\n\")" <<< "$response" 2>/dev/null
+}
+
+claude_panes() {
+  local response
+  response=$(h "$1" pane list 2>/dev/null) || return 1
+  jq -cse "$claude_json_checks
+    if length == 1 and (.[0] | type == \"object\") then .[0].result.panes
+    else error(\"invalid pane response\") end
+    | if type == \"array\" and all(.[];
+      type == \"object\" and (.pane_id | identifier) and (.terminal_id | identifier) and
+      (.agent == null or (.agent | identifier)) and
+      (.agent_session == null or ((.agent_session | type == \"object\") and
+        (.agent_session.value == null or (.agent_session.value | plain))))) and
+      ([.[].terminal_id] | length == (unique | length)) and
+      ([.[].pane_id] | length == (unique | length))
+    then . else error(\"invalid panes\") end" <<< "$response" 2>/dev/null
+}
+
+# A restored command can cross cmux's wrapper before returning to launch().
+# Keep the no-guess policy across that boundary instead of find_running's
+# permissive attach. The marker is consumed before any agent environment is saved.
+claude_recovery_no_live_copy() {
+  local id=$1 observed session live
+  local -a sessions
+  observed=$(claude_running_sessions) || claude_restore_error "$id" continuity
+  sessions=(${(f)observed})
+  for session in "${sessions[@]}"; do
+    live=$(claude_panes "$session") || claude_restore_error "$id" continuity
+    if jq -e --arg id "$id" 'any(.agent_session.value == $id)' \
+      <<< "$live" >/dev/null; then
+      claude_restore_error "$id" continuity
+    fi
+  done
+}
+
+claude_launch_config() {
+  if [[ -n ${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}${CLAUDE_CODE_OAUTH_TOKEN:-} ]]; then
+    print -r -- '{"kind":"unknown","reason":"auth-override"}'
+  elif (( ${+CLAUDE_CONFIG_DIR} )); then
+    if [[ $CLAUDE_CONFIG_DIR == /* ]]; then
+      jq -cn --arg value "$CLAUDE_CONFIG_DIR" '{kind:"explicit",value:$value}'
+    else
+      print -r -- '{"kind":"unknown","reason":"unsupported-context"}'
+    fi
+  else
+    print -r -- '{"kind":"unset"}'
+  fi
+}
+
+claude_binding_file() {
+  local key
+  key=$(jq -nr --arg s "$1" --arg t "$2" '[$s,$t] | @base64' | tr '/+' '_-') || return 1
+  print -r -- "$state_dir/claude-launch/$key.json"
+}
+
+# A complete private file is published in one filesystem operation. Bindings use
+# a hard link so a second writer cannot replace an already-published launch.
+write_private_json() (
+  local file=$1 body=$2 create_only=${3:-} dir=${1:h} temporary
+  umask 077
+  [[ ! -L $dir ]] && mkdir -p -m 700 -- "$dir" 2>/dev/null || return 1
+  [[ -O $dir && ! -L $dir && ! -d $file ]] || return 1
+  chmod 700 "$dir" 2>/dev/null || return 1
+  temporary=$(mktemp "$dir/.claude.XXXXXXXX") || return 1
+  trap 'rm -f -- "$temporary"' EXIT
+  print -r -- "$body" >| "$temporary" && chmod 600 "$temporary" || return 1
+  if [[ -n $create_only ]]; then
+    /bin/ln "$temporary" "$file" 2>/dev/null
+  else
+    /bin/mv -f -- "$temporary" "$file" 2>/dev/null
+  fi
+)
+
+claude_binding_config() {
+  local file
+  file=$(claude_binding_file "$1" "$2") || return 1
+  if [[ -f $file && ! -L $file && -O $file && ! -L ${file:h} ]]; then
+    jq -cse "$claude_json_checks
+      if length == 1 and (.[0] | .version == 1 and .session == \$s and
+        .original_terminal_id == \$t and (.claude_config | config))
+      then .[0].claude_config else error(\"invalid binding\") end" \
+      --arg s "$1" --arg t "$2" "$file" 2>/dev/null && return 0
+  fi
+  print -r -- '{"kind":"unknown","reason":"unrecorded"}'
+}
+
+save_claude_binding() {
+  local session=$1 terminal=$2 context=$3 file body
+  [[ -n $terminal ]] || return 1
+  file=$(claude_binding_file "$session" "$terminal") || return 1
+  body=$(jq -cn --arg s "$session" --arg t "$terminal" --argjson c "$context" \
+    '{version:1,session:$s,original_terminal_id:$t,claude_config:$c}') || return 1
+  write_private_json "$file" "$body" new && return 0
+  # Repeated publication of the same value is harmless, never an overwrite.
+  [[ -f $file && ! -L $file ]] && jq -se --argjson expected "$body" \
+    'length == 1 and .[0] == $expected' "$file" >/dev/null 2>&1
+}
+
+claude_restore_error() {
+  local id=$1 reason=$2 profile=${3:-} target="this tab"
+  [[ -z $id ]] || target="Claude session $id"
+  case $reason in
+    (unknown)
+      warn "can't restore $target: original account profile is unknown"
+      print -ru2 -- 'Resume this conversation manually with the intended account.' ;;
+    (unavailable)
+      warn "can't restore $target: saved account profile is unavailable"
+      [[ -z $profile ]] || { print -rnu2 -- 'Profile: '; jq -nr --arg p "$profile" '$p | @json' >&2; }
+      print -ru2 -- 'Restore access to the saved profile, then retry.' ;;
+    (override)
+      warn "can't restore $target: an authentication override is set"
+      print -ru2 -- 'Retry from a shell without authentication overrides for the saved profile.' ;;
+    (continuity)
+      warn "can't restore $target: its terminal identity changed"
+      print -ru2 -- 'Attach the running pane deliberately, or resume with the intended account.' ;;
+    (*)
+      warn "can't restore this tab: its saved record is invalid or unsupported"
+      print -ru2 -- 'Resume the conversation manually with the intended account.' ;;
+  esac
+  exit 1
+}
+
+tab_recovery_unavailable() {
+  warn "couldn't save Claude account context; automatic recovery is unavailable"
+  print -ru2 -- 'This pane can still be attached while it is running.'
+  # If even invalidation fails, keep the created pane alive but do not attach this
+  # tab under stale metadata. A later deliberate attach can retry after repair.
+  if [[ -L $state_dir/tabs ]] || ! rm -f -- "$state_dir/tabs/$CMUX_SURFACE_ID" 2>/dev/null; then
+    print -rnu2 -- 'Directory: '
+    jq -nr --arg d "$state_dir/tabs" '$d | @json' >&2
+    die "couldn't clear this tab's old recovery record; repair its directory before attaching"
+  fi
+}
+
+# Notes which Herdr pane this cmux tab shows. Claude notes additionally snapshot
+# the immutable launch selector, so a dead pane can resume without guessing it.
 remember_tab() {
-  local session=$1 pane=$2 dir=$state_dir/tabs row
+  local session=$1 pane=$2 terminal=$3 dir=$state_dir/tabs row context body agent
   [[ ${CMUX_SURFACE_ID:-} == [[:xdigit:]-]## ]] || return 0
-  row=$(h $session pane list 2>/dev/null | jq -r --arg p $pane '
-    first(.result.panes[] | select(.pane_id == $p)) | [.agent // "", .agent_session.value // ""] | @tsv')
-  mkdir -p -m 700 -- $dir 2>/dev/null || return 0
-  print -r -- "$session"$'\t'"$pane"$'\t'"$row" >| $dir/$CMUX_SURFACE_ID
+  if [[ -n ${claude_restoring:-} ]]; then
+    row=$(claude_panes "$session") || claude_restore_error "$claude_restore_id" continuity
+    row=$(jq -ce --arg p "$pane" --arg t "$terminal" \
+      'first(.[] | select(.pane_id == $p and .terminal_id == $t)) // empty' <<< "$row") || row=
+  else
+    row=$(h "$session" pane list 2>/dev/null | jq -ce --arg p "$pane" --arg t "$terminal" \
+      'first(.result.panes[] | select(.pane_id == $p and .terminal_id == $t)) // empty') || row=
+  fi
+  if [[ -z $row ]]; then
+    [[ -z ${claude_restoring:-} ]] || claude_restore_error "$claude_restore_id" continuity
+    if [[ ${claude_new_terminal:-} == "$terminal" ]] ||
+      jq -e 'type == "object" and .agent == "claude"' "$dir/$CMUX_SURFACE_ID" >/dev/null 2>&1; then
+      tab_recovery_unavailable
+    fi
+    return 0
+  fi
+  agent=$(jq -r '.agent_session.agent // .agent // ""' <<< "$row")
+  context=$(claude_binding_config "$session" "$terminal") || return 0
+  if [[ $agent == claude || -n ${claude_restoring:-} || ${claude_new_terminal:-} == "$terminal" ]]; then
+    if [[ ${claude_unrecorded_terminal:-} == "$terminal" ]]; then
+      context='{"kind":"unknown","reason":"write-failed"}'
+    fi
+    body=$(jq -cn --arg s "$session" --arg p "$pane" --arg t "$terminal" \
+      --argjson row "$row" --argjson c "$context" \
+      '{version:1,session:$s,pane:$p,terminal_id:$t,agent:"claude",
+        id:($row.agent_session.value // ""),claude_config:$c}') || { tab_recovery_unavailable; return 0; }
+    write_private_json "$dir/$CMUX_SURFACE_ID" "$body" || tab_recovery_unavailable
+  else
+    row=$(jq -r '[.agent // "", .agent_session.value // ""] | @tsv' <<< "$row")
+    mkdir -p -m 700 -- "$dir" 2>/dev/null || return 0
+    print -r -- "$session"$'\t'"$pane"$'\t'"$row" >| "$dir/$CMUX_SURFACE_ID"
+  fi
   rm -f -- $dir/*(Nm+30)
 }
 
@@ -505,7 +695,7 @@ remember_pane() {
 # that name (argv[0]), and cmux accepts no environment variable but its own to match on
 attach() {
   local session=$1 terminal=$2 pane=$3 takeover=${4:-}
-  remember_tab $session $pane
+  remember_tab "$session" "$pane" "$terminal"
   remember_pane $session $pane
   if [[ -n ${HERDR_AGENT_ATTACH:-} ]]; then
     exec ${(Q)${(z)HERDR_AGENT_ATTACH}} $session $terminal $pane
@@ -544,7 +734,8 @@ remember_remote_tab() {
 }
 
 launch() {
-  local agent=$1
+  local agent=$1 claude_recovery=${HERDR_AGENT_CLAUDE_RESTORE:-}
+  unset HERDR_AGENT_CLAUDE_RESTORE
   shift
   local -a args=("$@")
   local real
@@ -568,12 +759,14 @@ launch() {
 
   local rid found named
   rid=$(resume_id $agent "$@")
-  if [[ -n $rid ]] && found=$(find_running $rid); then
+  if [[ $agent == claude && $claude_recovery == 1 ]]; then
+    claude_recovery_no_live_copy "$rid"
+  elif [[ -n $rid ]] && found=$(find_running $rid); then
     attach ${=found} takeover
   fi
   # `claude --resume <text>` opens Claude's picker on that text; when the text names
   # exactly one of this folder's conversations and it already runs, open that instead
-  if [[ $agent == claude && -n $rid && $rid != [[:xdigit:]](#c8)-[[:xdigit:]](#c4)-* ]] &&
+  if [[ $agent == claude && $claude_recovery != 1 && -n $rid && $rid != [[:xdigit:]](#c8)-[[:xdigit:]](#c4)-* ]] &&
     named=$(claude_named_session $rid) && found=$(find_running $named); then
     attach ${=found} takeover
   fi
@@ -633,7 +826,17 @@ launch() {
     fi
     nap 10
   done
-  attach $session $terminal $pane
+  local claude_new_terminal= claude_unrecorded_terminal= context
+  if [[ $agent == claude ]]; then
+    claude_new_terminal=$terminal
+    context=$(claude_launch_config)
+    if ! save_claude_binding "$session" "$terminal" "$context"; then
+      claude_unrecorded_terminal=$terminal
+      warn "couldn't save Claude account context; automatic recovery is unavailable"
+      print -ru2 -- 'This pane can still be attached while it is running.'
+    fi
+  fi
+  attach "$session" "$terminal" "$pane"
 }
 
 cmd_status() {
@@ -787,31 +990,104 @@ resume_argv_for() {
   esac
 }
 
-# After a cmux restart, cmux's restart command lands here: show the pane this tab showed
-# before, or, when that pane is gone (a reboot), start its agent's session again
+# A known Claude note follows terminal identity, never a coincidentally reused
+# public pane name. Legacy living-pane and remote behavior remain unchanged.
 restore_tab() {
   local note=$state_dir/tabs/${CMUX_SURFACE_ID:-} session pane agent id terminal
+  local raw parsed context kind profile_dir live matched claude_restore_id claude_restoring session_candidate observed
   local -a sessions resume_argv remote
   [[ -n ${CMUX_SURFACE_ID:-} && -f $note ]] ||
     die "this tab has no saved herdr pane (see: herdr-agent ps, herdr-agent attach)"
-  # a remote herdr: run what the tab ran. An unreachable host prints ssh's reason and ends
-  # here, back at the tab's shell; cmux runs a restart command once, so nothing retries
-  IFS=$'\t' read -rA remote <$note
+  raw=$(< "$note")
+  IFS=$'\t' read -rA remote <<< "$raw"
   if [[ ${remote[1]:-} == --remote ]]; then
     forget_herdr_pane
-    exec -a $restart_id $herdr $remote
+    exec -a $restart_id "$herdr" "${remote[@]}"
   fi
-  IFS=$'\t' read -r session pane agent id <$note
-  sessions=(${(f)"$(running_sessions)"})
-  if (( ${sessions[(Ie)$session]} )); then
-    terminal=$(h $session pane list 2>/dev/null |
-      jq -r --arg p $pane '.result.panes[] | select(.pane_id == $p) | .terminal_id')
-    [[ -n $terminal ]] && attach $session $terminal $pane takeover
+  if [[ $raw == [a-zA-Z0-9_.-]##$'\t'* ]]; then
+    IFS=$'\t' read -r session pane agent id <<< "$raw"
+    jq -ne "$claude_json_checks \$s | identifier" --arg s "$session" >/dev/null 2>&1 &&
+      jq -ne "$claude_json_checks \$p | identifier" --arg p "$pane" >/dev/null 2>&1 &&
+      jq -ne "$claude_json_checks \$id | plain" --arg id "$id" >/dev/null 2>&1 ||
+      claude_restore_error '' invalid
+    kind=legacy
+  else
+    parsed=$(jq -cse "$claude_json_checks
+      if length == 1 and (.[0] | type == \"object\" and .version == 1 and
+        .agent == \"claude\" and (.session | identifier) and (.pane | identifier) and
+        (.terminal_id | identifier) and (.id | plain) and
+        (.id == \"\" or (.id | startswith(\"-\") | not)) and (.claude_config | config))
+      then .[0] else error(\"invalid note\") end" "$note" 2>/dev/null) ||
+      claude_restore_error '' invalid
+    session=$(jq -r .session <<< "$parsed")
+    pane=$(jq -r .pane <<< "$parsed")
+    terminal=$(jq -r .terminal_id <<< "$parsed")
+    id=$(jq -r .id <<< "$parsed")
+    context=$(jq -c .claude_config <<< "$parsed")
+    agent=claude
+    kind=json
+  fi
+  if [[ $kind == json ]]; then
+    observed=$(claude_running_sessions) || claude_restore_error "$id" continuity
+    sessions=(${(f)observed})
+  else
+    sessions=(${(f)"$(running_sessions)"})
+  fi
+  if [[ $kind == json ]]; then
+    # A failed observation is uncertainty, not evidence that the pane is gone.
+    if (( ${sessions[(Ie)$session]} )); then
+      live=$(claude_panes "$session") || claude_restore_error "$id" continuity
+      matched=$(jq -r --arg t "$terminal" \
+        'first(.[] | select(.terminal_id == $t) | .pane_id) // empty' <<< "$live")
+      if [[ -n $matched ]]; then
+        claude_restore_id=$id
+        claude_restoring=1
+        attach "$session" "$terminal" "$matched" takeover
+      fi
+      if jq -e --arg p "$pane" 'any(.pane_id == $p)' <<< "$live" >/dev/null; then
+        claude_restore_error "$id" continuity
+      fi
+    fi
+    # The resume wrapper searches every session. Do not let it attach an
+    # unverified live copy or start a duplicate after a handoff changed its ID.
+    for session_candidate in "${sessions[@]}"; do
+      live=$(claude_panes "$session_candidate") || claude_restore_error "$id" continuity
+      if [[ -n $id ]] && jq -e --arg id "$id" \
+        'any(.agent_session.value == $id)' <<< "$live" >/dev/null; then
+        claude_restore_error "$id" continuity
+      fi
+    done
+  elif (( ${sessions[(Ie)$session]} )); then
+    terminal=$(h "$session" pane list 2>/dev/null |
+      jq -r --arg p "$pane" '.result.panes[] | select(.pane_id == $p) | .terminal_id')
+    [[ -n $terminal ]] && attach "$session" "$terminal" "$pane" takeover
+  fi
+  if [[ $agent == claude ]]; then
+    [[ $kind == json ]] || claude_restore_error "$id" unknown
+    kind=$(jq -r .kind <<< "$context")
+    [[ $kind != unknown ]] || claude_restore_error "$id" unknown
+    [[ -z ${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}${CLAUDE_CODE_OAUTH_TOKEN:-} ]] ||
+      claude_restore_error "$id" override
+    if [[ $kind == explicit ]]; then
+      # The sentinel retains trailing newlines that command substitution strips.
+      profile_dir=$(jq -jr '.value' <<< "$context"; print -rn -- .)
+      profile_dir=${profile_dir%.}
+    else
+      profile_dir=$HOME/.claude
+    fi
+    [[ -d $profile_dir && -r $profile_dir && -x $profile_dir ]] ||
+      claude_restore_error "$id" unavailable "$profile_dir"
   fi
   resume_argv_for "$agent" "$id" ||
     die "herdr pane $pane in session $session is gone, and there's no agent session to start again"
   warn "herdr pane $pane in session $session is gone; starting its $agent session again"
-  exec $resume_argv
+  if [[ $agent == claude && $kind == explicit ]]; then
+    exec /usr/bin/env HERDR_AGENT_CLAUDE_RESTORE=1 "CLAUDE_CONFIG_DIR=$profile_dir" "${resume_argv[@]}"
+  elif [[ $agent == claude ]]; then
+    exec /usr/bin/env -u CLAUDE_CONFIG_DIR HERDR_AGENT_CLAUDE_RESTORE=1 "${resume_argv[@]}"
+  else
+    exec "${resume_argv[@]}"
+  fi
 }
 
 # show a running pane in this terminal, taking it over from any other screen;
