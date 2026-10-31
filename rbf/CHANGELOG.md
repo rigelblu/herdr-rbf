@@ -8,6 +8,12 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.15.2 (2026-10-31)
+## 🟠⋯ Fixed for End Users
+- 2026-10-31 - fix | A tab showing one agent now prints only that agent's notifications, and prints them even if you never clicked into the tab. Before, a tab could print "finished" or "needs attention" for any other agent in the same herdr session, and a tab you hadn't clicked stayed quiet about its own agent. Reattach every tab after installing, since the install closes them. An agent with no tab now notifies only tabs running bare `herdr`. Where cmux drops herdr notifications from a tab (cmux-rbf `cm-132`), that tab stays silent until that's fixed (#hrdr-30)
+
+---
+
 # 🔵⋯ v0.15.1 (2026-10-27)
 ## 🟠⋯ Fixed for End Users
 - 2026-10-27 - fix | Restore each Claude conversation with its original account profile after its Herdr pane is gone. Unknown profiles or uncertain terminal identity stop with recovery guidance; older dead-pane records require deliberate account-specific resume (#hrdr-29)
