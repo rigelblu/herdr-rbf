@@ -78,6 +78,7 @@ mod endpoint_requests;
 mod lifecycle;
 mod notifications;
 mod pane_graphics;
+mod pane_notification_recipients;
 mod render;
 mod retained_surface;
 mod session_expiry_hook;

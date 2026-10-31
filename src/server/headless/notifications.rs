@@ -93,8 +93,10 @@ impl HeadlessServer {
         let agent = known_agent
             .map(crate::detect::agent_label)
             .map(str::to_owned);
-        self.send_to_client_shells(ServerMessage::SemanticNotification(
-            protocol::SemanticNotification {
+        self.send_pane_notification(
+            ws_idx,
+            pane_id,
+            ServerMessage::SemanticNotification(protocol::SemanticNotification {
                 kind: semantic_kind,
                 title: format!("{agent_label} {event_text}"),
                 body: non_empty_body(&context),
@@ -104,8 +106,8 @@ impl HeadlessServer {
                 tab_id: Some(tab_id),
                 pane_id: Some(public_pane_id),
                 position: None,
-            },
-        ))
+            }),
+        )
     }
 
     fn forward_pane_state_update_notifications_to_clients(

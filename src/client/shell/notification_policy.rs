@@ -193,7 +193,7 @@ impl ClientShellState {
             }
             let target_active =
                 self.notification_target_is_active(&pending.endpoint_id, &pending.event);
-            let suppress_external = target_active && self.outer_focused != Some(false);
+            let suppress_external = target_active && self.focus_for_notifications() != Some(false);
             if let Some(sound) = pending.event.sound {
                 let suppress_sound =
                     pending.event.kind == SemanticNotificationKind::Finished && suppress_external;

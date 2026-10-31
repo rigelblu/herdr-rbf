@@ -593,9 +593,10 @@ impl ClientShellState {
             None
         };
         if let Some(surface) = presented_surface {
+            let focus = self.focus_for_notifications();
             self.endpoints[index]
                 .agent_presentation
-                .acknowledge_surface(&mut snapshot, surface, self.outer_focused);
+                .acknowledge_surface(&mut snapshot, surface, focus);
         }
         let previous = self.endpoints[index].snapshot.as_deref();
         let mut next_recency = self
@@ -671,6 +672,7 @@ impl ClientShellState {
         else {
             return false;
         };
+        let focus = self.focus_for_notifications();
         let changed = {
             let endpoint = &mut self.endpoints[index];
             let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
@@ -678,7 +680,7 @@ impl ClientShellState {
             };
             endpoint
                 .agent_presentation
-                .acknowledge_surface(snapshot, surface, self.outer_focused)
+                .acknowledge_surface(snapshot, surface, focus)
         };
         if changed {
             self.snapshot = self.endpoints[index].snapshot.clone();

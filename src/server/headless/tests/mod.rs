@@ -4,6 +4,8 @@ use super::*;
 mod pane_graphics_tests;
 #[path = "pane_move.rs"]
 mod pane_move_tests;
+#[path = "pane_notification_recipients.rs"]
+mod pane_notification_recipients_tests;
 #[path = "surface_delta.rs"]
 mod surface_delta_tests;
 #[path = "surface_interest.rs"]

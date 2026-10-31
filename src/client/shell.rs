@@ -25,6 +25,7 @@ mod line_selection;
 mod link_hover;
 mod mobile;
 mod mouse;
+mod notification_focus;
 mod notification_policy;
 mod notifications;
 mod overlay_input;
