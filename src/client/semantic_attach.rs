@@ -224,8 +224,8 @@ fn prepare_inner_until(
                         serde_json::from_slice::<schema::SuccessResponse>(&response_bytes)
                             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                     let schema::ResponseResult::TerminalAttached {
+                        pane_id,
                         projection_revision,
-                        ..
                     } = response.result
                     else {
                         return Err(io::Error::new(
@@ -234,6 +234,7 @@ fn prepare_inner_until(
                         ));
                     };
                     attached_revision = Some(projection_revision);
+                    prefetched.retain(|message| notification_is_for(message, &pane_id));
                     for pending in pending_projection.drain(..) {
                         match &pending {
                             ServerMessage::EndpointControl { kind, data }
@@ -273,6 +274,21 @@ fn prepare_inner_until(
         if attached_revision.is_some() && matching_snapshot && matching_surface {
             return Ok(prefetched);
         }
+    }
+}
+
+/// herdr-rbf `hrdr-30.1`: false for a notification about a pane other than
+/// `pane_id`. Until the attach lands the server treats this tab as a full view and
+/// sends it every pane's notification; the handshake replays what it buffered, so
+/// another agent's must not survive it. A notification with no pane isn't about
+/// any agent and is kept.
+fn notification_is_for(message: &ServerMessage, pane_id: &str) -> bool {
+    match message {
+        ServerMessage::SemanticNotification(notification) => notification
+            .pane_id
+            .as_deref()
+            .is_none_or(|notified| notified == pane_id),
+        _ => true,
     }
 }
 
@@ -763,5 +779,82 @@ mod tests {
             decoded,
             ServerMessage::PaneSurface(surface) if surface.frame.cells[0].symbol == "b"
         ));
+    }
+
+    fn pane_notification(title: &str, pane_id: Option<&str>) -> ServerMessage {
+        ServerMessage::SemanticNotification(protocol::SemanticNotification {
+            kind: protocol::SemanticNotificationKind::Finished,
+            title: title.into(),
+            body: None,
+            sound: Some(protocol::SemanticNotificationSound::Done),
+            agent: None,
+            workspace_id: None,
+            tab_id: None,
+            pane_id: pane_id.map(str::to_owned),
+            position: None,
+        })
+    }
+
+    // herdr-rbf `hrdr-30.1`: while a tab attaches, the server still treats it as a
+    // full view, so it can send any agent's notification. What `prepare` buffers is
+    // replayed after the attach, so another agent's notification must not survive it.
+    #[test]
+    fn startup_drops_another_agents_notification_and_keeps_its_own_and_pane_less_ones() {
+        let (mut client, mut server, path) = local_stream_pair();
+        // `prepare` sets a receive timeout, which macOS rejects once the peer has closed.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let fake_server = std::thread::spawn(move || {
+            protocol::write_message(&mut server, &snapshot(1)).expect("initial snapshot");
+            read_attach_request(&mut server);
+            let response = schema::SuccessResponse {
+                id: REQUEST_ID.into(),
+                result: schema::ResponseResult::TerminalAttached {
+                    pane_id: "pane-own".into(),
+                    projection_revision: 7,
+                },
+            };
+            for message in [
+                pane_notification("other before", Some("pane-other")),
+                pane_notification("own before", Some("pane-own")),
+                pane_notification("pane-less", None),
+                ServerMessage::EndpointControl {
+                    kind: "test.marker".into(),
+                    data: String::new(),
+                },
+                ServerMessage::ClientShellEndpointResponseChunk {
+                    boot_id: "boot".into(),
+                    request_id: REQUEST_ID.into(),
+                    final_chunk: true,
+                    data: serde_json::to_vec(&response).expect("serialize response"),
+                },
+                snapshot(7),
+                surface(7),
+            ] {
+                protocol::write_message(&mut server, &message).expect("startup message");
+            }
+            let _ = release_rx.recv();
+        });
+
+        let messages = prepare(&mut client, "term_1".into(), false, &mut None)
+            .expect("attached projection should become ready");
+        release_tx.send(()).expect("release fake server");
+        fake_server.join().expect("fake server");
+        let _ = std::fs::remove_file(path);
+
+        // Full order, non-notification message included: own pane's notification, the
+        // pane-less one, then the marker.
+        let order = messages
+            .iter()
+            .filter_map(|message| match message {
+                ServerMessage::SemanticNotification(notification) => {
+                    Some(notification.title.as_str())
+                }
+                ServerMessage::EndpointControl { kind, .. } if kind == "test.marker" => {
+                    Some("<marker>")
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["own before", "pane-less", "<marker>"]);
     }
 }
