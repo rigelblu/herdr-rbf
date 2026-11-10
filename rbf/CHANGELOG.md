@@ -8,6 +8,18 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.16.0 (2026-11-09)
+## 🟠⋯ Added for End Users
+- 2026-11-09 - feat | herdr-rbf now builds on upstream Herdr's master `ee5bfb50` (2026-10-29, after 0.9.5), with every fork feature carried. Upstream's fixes since 0.9.1 reach the fork: typing echoes sooner (#5149), sessions are saved before a macOS restart (#5092) and written safely (#5152), big sessions use less CPU and memory (#5085, #4845, #4847, #4873, #4669–#4671), prefix bindings work when the terminal sends plain text (#5277), and the server keeps running when its terminal closes (#4965, #5236). The install closes every attached tab, so reattach them afterwards, and run `herdr integration install codex` once so Codex keeps reporting its session (#hrdr-33)
+
+## 🟠⋯ Changed for End Users
+- 2026-11-09 - feat (BREAKING) | from upstream: closing a workspace's last pane now asks first (#5173); set `ui.confirm_close = false` to turn it off. Closing the shell that started herdr no longer stops the server (#4965). On macOS, ⌘-hover and ⌘-click on a wrapped link still cover the whole link with mouse capture on, where upstream #5064 would drop it to the first row (#hrdr-33)
+
+## 🟠⋯ Changed for Technical Users
+- 2026-11-09 - feat (BREAKING) | from upstream: the socket's `pane.graphics.*` methods are gone and return `unknown_method`; images now go through native kitty rendering (#4561) (#hrdr-33)
+
+---
+
 # 🔵⋯ v0.15.2 (2026-10-31)
 ## 🟠⋯ Fixed for End Users
 - 2026-10-31 - fix | A tab showing one agent now prints only that agent's notifications, and prints them even if you never clicked into the tab. Before, a tab could print "finished" or "needs attention" for any other agent in the same herdr session, and a tab you hadn't clicked stayed quiet about its own agent. Reattach every tab after installing, since the install closes them. An agent with no tab now notifies only tabs running bare `herdr`. Where cmux drops herdr notifications from a tab (cmux-rbf `cm-132`), that tab stays silent until that's fixed (#hrdr-30)
