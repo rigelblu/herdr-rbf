@@ -29,11 +29,11 @@ route() {
   IFS=$'\t' read -r surface workspace pid <$note
   # a note outlives its tab; without that process cmux has nothing to resolve
   [[ -n $surface && -n $pid ]] && kill -0 $pid 2>/dev/null || return 0
-  # the agent names the variable cmux reads, and it arrives in one of two shapes:
-  # `cmux [--socket …] hooks <agent> <event>` and `cmux [--socket …] hooks feed --source <agent>`
+  # Keep this parse in step with the hook shapes the README's "Why the shim exists" lists
   for (( i = 1; i <= $#argv; i++ )); do
     [[ $argv[i] == hooks ]] && { agent=${argv[i + 1]:-}; break }
   done
+  [[ $agent == enqueue ]] && agent=${argv[i + 2]:-}
   if [[ $agent == feed ]]; then
     agent=
     for (( i = 1; i <= $#argv; i++ )); do

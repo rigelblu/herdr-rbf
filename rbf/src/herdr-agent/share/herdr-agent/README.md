@@ -262,13 +262,16 @@ Anything missing or stale, it runs cmux unchanged — a hook never fails because
 truth — when that fails. So the pid export is what actually saves a moved pane: the surface claim
 often fails, because the note's workspace goes stale the moment a tab is moved between workspaces.
 
-Hooks arrive in two shapes, and both have to be recognised:
+Hooks arrive in three shapes, and all three have to be recognised:
 
     cmux [--socket …] hooks <agent> <event>
+    cmux [--socket …] hooks enqueue <agent> <event>
     cmux [--socket …] hooks feed --source <agent>
 
-claude sends 9 of the first and 3 of the second. Matching only the first leaves a quarter of its
-hooks unrouted, carrying the dead pid.
+As of cmux on 2026-11-19, `CLI/CMUXCLI+ClaudeHookSettings.swift` installs 16 hooks for claude:
+2 of the first, 12 of the second and 2 of the third. Matching only the first leaves 14 of them
+unrouted, carrying the dead pid. Count them there again after a cmux update, and change `route()`
+in `hook-cmux` with this list.
 
 ## What can be routed, and what can't
 
