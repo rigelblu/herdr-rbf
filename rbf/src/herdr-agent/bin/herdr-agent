@@ -23,7 +23,8 @@
 #   herdr-agent open                 this folder's herdr session, in a shell here (bare herdr runs this)
 #   herdr-agent on | off | status   the switch; off runs every agent right here
 #   herdr-agent session [dir]       the herdr session a folder's agents go to
-#   herdr-agent ps [session]        agents: session, workspace, tab number, agent, status, age, title, directory
+#   herdr-agent ps [session]        agents: tab name, status, age, agent, session, workspace, tab number, directory
+#                                   (on a terminal each line is cut at its width; piped, lines stay whole)
 #                                   (see one: herdr --session S pane read PANE --source visible)
 #   herdr-agent attach [session pane]  show a running agent in this terminal (none given: pick one);
 #                                   it moves here from any other tab showing it
@@ -894,14 +895,16 @@ cmd_status() {
 # Location and status for each agent. The picker carries an opaque session/pane
 # key beside the display, so spaces and duplicate titles never choose the target.
 agent_table() {
-  local session workspaces tabs panes pane agent pid age ages rows picker=0
+  local session workspaces tabs panes pane agent pid age ages rows line i picker=0
+  local -a fields widths
   local -A age_by_pid
   while read -r pid age; do
     [[ $pid == <-> ]] && age_by_pid[$pid]=$age
   done < <(ps -axo pid=,etime= 2>/dev/null)
   [[ ${1:-} == --picker ]] && { picker=1; shift; }
   rows=$({
-    print -r -- $'-\tSESSION\tWORKSPACE\tTAB\tAGENT\tSTATUS\tAGE\tTAB NAME\tCWD'
+    # keep the column order in step with the jq field list below and cmd_attach's --nth
+    print -r -- $'-\tTAB NAME\tSTATUS\tAGE\tAGENT\tSESSION\tWORKSPACE\tTAB\tCWD'
     for session in "$@"; do
       workspaces=$(h $session workspace list 2>/dev/null |
         jq -ce '.result.workspaces | if type == "array" then . else [] end') || workspaces='[]'
@@ -952,19 +955,30 @@ agent_table() {
         | ([$workspaces[] | select(.workspace_id == $pane.workspace_id)][0].label) as $workspace
         | ([$tabs[] | select(.tab_id == $pane.tab_id)][0].number) as $tab
         | ([$s, .pane_id] | tojson | @base64) as $key
-        | [$s, $workspace, $tab, .agent, .agent_status, ($ages[.pane_id] | age), .terminal_title_stripped, .cwd]
+        | [.terminal_title_stripped, .agent_status, ($ages[.pane_id] | age), .agent, $s, $workspace, $tab, .cwd]
         | map(display) | join("\t") | $key + "\t" + .' <<<$panes
     done
   })
-  if (( picker )); then
-    paste <(print -r -- "$rows" | cut -f1) \
-      <(print -r -- "$rows" | cut -f2- | column -t -s $'\t')
-  else
-    print -r -- "$rows" | cut -f2- | column -t -s $'\t'
-  fi
+  # not `column -t`: fzf's --nth matches one tab-separated field per column, and BSD
+  # column can't keep the tab
+  for line in ${(f)rows}; do
+    fields=("${(@ps:\t:)line}")
+    for i in {2..$#fields}; do
+      (( ${(m)#fields[i]} > ${widths[i]:-0} )) && widths[i]=${(m)#fields[i]}
+    done
+  done
+  for line in ${(f)rows}; do
+    fields=("${(@ps:\t:)line}")
+    for i in {2..$(( $#fields - 1 ))}; do
+      fields[i]=${(mr:$(( widths[i] + 1 )):)fields[i]}
+    done
+    (( picker )) || shift fields
+    print -r -- "${(pj:\t:)fields}"
+  done
 }
 
 cmd_ps() {
+  local line cut
   local -a sessions
   (( $+commands[jq] )) || die "ps needs jq"
   sessions=(${(f)"$(running_sessions)"})
@@ -972,7 +986,16 @@ cmd_ps() {
     (( ${sessions[(Ie)$1]} )) || die "no running herdr session named $1 (see: herdr session list)"
     sessions=($1)
   fi
-  agent_table $sessions
+  agent_table $sessions | while IFS= read -r line; do
+    line=${line//$'\t'/ }
+    if [[ -t 1 && ${COLUMNS:-} == <-> ]] && (( COLUMNS >= 3 && ${(m)#line} > COLUMNS )); then
+      cut=${(mr:$(( COLUMNS - 2 )):)line}
+      # zsh keeps a wide character that crosses the cut, so the line would overshoot and wrap
+      (( ${(m)#cut} > COLUMNS - 2 )) && cut="${cut[1,-2]} "
+      line="$cut··"
+    fi
+    print -r -- "$line"
+  done
 }
 
 # The command that starts agent $1's session $2 again, into resume_argv. claude and codex
@@ -1104,8 +1127,9 @@ cmd_attach() {
     (( $+commands[fzf] )) ||
       die "picking needs fzf; or name one: herdr-agent attach <session> <pane> (pane IDs: herdr --session <session> pane list)"
     (( $#sessions )) || die "no herdr session is running"
+    # --nth=1,5 are agent_table's tab name and session columns
     choice=$(agent_table --picker $sessions | fzf --delimiter=$'\t' --with-nth=2.. \
-      --header-lines=1 --reverse --height=40% --prompt='attach to: ') || exit 1
+      --nth=1,5 --exact --no-hscroll --tabstop=1 --header-lines=1 --reverse --height=40% --prompt='attach to: ') || exit 1
     target=("${(@f)$(print -r -- "${choice%%$'\t'*}" | jq -Rr '@base64d | fromjson | .[]')}")
     (( $#target == 2 )) || die "invalid picker selection"
     session=${target[1]} pane=${target[2]}
