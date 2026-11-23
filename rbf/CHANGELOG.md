@@ -8,6 +8,15 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.16.2 (2026-11-23)
+## 🟠⋯ Fixed for End Users
+- 2026-11-23 - fix | The `herdr-agent attach` picker and `herdr-agent ps` keep their columns lined up in a tab of any width. Tab name, status and age come first, and a row never slides sideways while you type. Typing a feature ID, or just its number, keeps only the tabs whose name holds it, and typing a session name keeps that session's tabs, so `42` no longer matches an agent's age or folder (#hrdr-42)
+
+## 🟠⋯ Changed for End Users
+- 2026-11-23 - fix (BREAKING) | `herdr-agent ps` prints its columns in the new order: tab name, status, age, agent, session, workspace, tab number, folder. On a terminal it cuts each line at the terminal's width. Piped, lines stay whole, so `herdr-agent ps | less -S` shows every row. In the picker, typing an agent name, a status or a folder no longer filters the list (#hrdr-42)
+
+---
+
 # 🔵⋯ v0.16.1 (2026-11-22)
 ## 🟠⋯ Fixed for End Users
 - 2026-11-22 - fix | After a cmux restart, Claude running in a herdr tab still tells cmux which tab shows it now and which attach process is alive there, so cmux puts its status and notifications on that tab. cmux now sends most of Claude's hooks as `hooks enqueue claude <event>`, which herdr-agent's hook shim didn't read: those hooks kept the tab and process Claude started with, and a new session after `/clear` never reached cmux. Running Claudes pick up the fix as soon as herdr-agent is installed, with no restart (#hrdr-38)
