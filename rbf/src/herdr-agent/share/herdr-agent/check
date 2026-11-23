@@ -10,6 +10,8 @@
 #   - checks the pane closed when the agent exited
 #   - checks bare herdr (herdr-agent open) opens the folder's own session in a shell tab there:
 #     the tab it picks, the ways it fails, and that it writes nothing but a lock
+#   - checks the attach picker and ps against a canned herdr: columns lined up, typed text matched
+#     as plain text in the tab name and session, ps cut at a terminal's width and whole in a pipe
 # With --with-claude it also starts the real claude (no prompt is sent), then
 # resumes its session and checks the launcher attached instead of starting a copy.
 # Run it from a folder Claude already trusts. The session is removed at the end.
@@ -1597,6 +1599,173 @@ if [[ -f $s21_state/locks/$session.lock ]] && (( $#s21_extra == 0 )); then
   pass "the opens of section 6 left only empty lock files, and no launch file"
 else
   fail "open left extra files: ${s21_extra[*]}"
+fi
+
+# Scenario 22: the attach picker and ps keep their columns lined up, match typed text as
+# plain text in the tab name and session, and cut ps at a terminal's width
+# Unlike stub_herdr, the canned herdr forwards nothing, so no real session is read.
+# The column order lives in three places in the launcher: the header, the jq field list and --nth=1,5
+pk=$work/picker
+mkdir -p -- $pk/bin $pk/data/probe-a $pk/data/probe-b
+real_fzf=${commands[fzf]:-}
+print -r -- '{"sessions":[{"name":"probe-a","running":true},{"name":"probe-b","running":true}]}' >$pk/data/sessions.json
+# pane, session, tab name, status, agent, workspace, tab number, directory, process ID, elapsed time
+pk_rows=(
+  "p1;probe-a;cm-142 | sync with upstream;working;claude;wsa;243;/h/cmux;91001;25:30"
+  "p2;probe-a;hk-46 | rebase;working;claude;漢字漢字漢字;25;/h/hunk;91002;01:42:10"
+  "p3;probe-a;漢字 🙂 notes;blocked;agy;-;-;/n/日本語;91003;2-04:10:00"
+  "p4;probe-b;pi-21 | agy model;idle;pi;wsc;6;/x/42/y;91004;11:05"
+  "p5;probe-b;Stacked PRs for nw-0;done;codex;wsd;8;/h/prs;91005;01:10"
+)
+for pk_s in probe-a probe-b; do
+  pk_panes=() pk_wss=() pk_tabs=()
+  for pk_row in $pk_rows; do
+    pk_f=("${(@s:;:)pk_row}")
+    [[ $pk_f[2] == $pk_s ]] || continue
+    pk_ws=w_$pk_f[1] pk_tab=t_$pk_f[1]
+    [[ $pk_f[6] == - ]] && pk_ws=w_none
+    [[ $pk_f[7] == - ]] && pk_tab=t_none
+    pk_panes+=("$(jq -nc --arg p $pk_f[1] --arg w $pk_ws --arg t $pk_tab --arg title $pk_f[3] --arg st $pk_f[4] \
+      --arg a $pk_f[5] --arg cwd $pk_f[8] '{pane_id: $p, terminal_id: ("term_" + $p), workspace_id: $w, tab_id: $t,
+      agent: $a, agent_status: $st, terminal_title_stripped: $title, cwd: $cwd}')")
+    [[ $pk_f[6] == - ]] || pk_wss+=("$(jq -nc --arg w $pk_ws --arg l $pk_f[6] '{workspace_id: $w, label: $l}')")
+    [[ $pk_f[7] == - ]] || pk_tabs+=("$(jq -nc --arg t $pk_tab --argjson n $pk_f[7] '{tab_id: $t, number: $n}')")
+    jq -nc --argjson pid $pk_f[9] --arg a $pk_f[5] '{result: {process_info: {shell_pid: ($pid + 5000),
+      foreground_process_group_id: $pid, foreground_processes: [{name: $a, argv0: $a, argv: [$a], pid: $pid}]}}}' \
+      >$pk/data/pi-$pk_f[1].json
+    print -r -- "$pk_f[9] $pk_f[10]" >>$pk/data/ps.txt
+  done
+  print -r -- "{\"result\":{\"panes\":[${(j:,:)pk_panes}]}}" >$pk/data/$pk_s/pane.json
+  print -r -- "{\"result\":{\"workspaces\":[${(j:,:)pk_wss}]}}" >$pk/data/$pk_s/workspace.json
+  print -r -- "{\"result\":{\"tabs\":[${(j:,:)pk_tabs}]}}" >$pk/data/$pk_s/tab.json
+done
+cat >$pk/bin/herdr <<'EOF2'
+#!/bin/zsh -f
+d=${0:h:h}/data
+[[ $1 == session && $2 == list ]] && { cat $d/sessions.json; exit 0 }
+[[ $1 == --session ]] || exit 1
+s=$2
+shift 2
+case "$1 $2" in
+  ("workspace list") cat $d/$s/workspace.json ;;
+  ("tab list") cat $d/$s/tab.json ;;
+  ("pane list") cat $d/$s/pane.json ;;
+  ("pane process-info") cat $d/pi-$4.json ;;
+  (*) exit 1 ;;
+esac
+EOF2
+print -r -- '#!/bin/zsh -f' >$pk/bin/ps
+print -r -- "cat ${(q)pk}/data/ps.txt" >>$pk/bin/ps
+cat >$pk/bin/fzf <<EOF2
+#!/bin/zsh -f
+print -rl -- "\$@" >${(q)pk}/fzf.args
+cat >${(q)pk}/fzf.in
+exit 1
+EOF2
+chmod +x $pk/bin/herdr $pk/bin/ps $pk/bin/fzf
+print -r -- '#!/bin/zsh -f' >$pk/widths
+cat >>$pk/widths <<'EOF2'
+emulate -R zsh
+while IFS= read -r l; do
+  if [[ $1 == fields ]]; then
+    f=("${(@ps:\t:)l}")
+    w=()
+    for i in {2..$(( $#f - 1 ))}; do w+=(${(m)#f[i]}); done
+    print -r -- "$w"
+  else
+    print -r -- ${(m)#l}
+  fi
+done
+EOF2
+chmod +x $pk/widths
+mkdir -p -- $pk/state
+pk_env=(env -i HOME=$HOME USER=$USER TERM=$TERM LANG=en_US.UTF-8 PATH=$pk/bin:$PATH HERDR_AGENT_STATE_DIR=$pk/state)
+
+# 22.1 the picker passes fzf its flags, and the header names the columns in order
+rm -f -- $pk/fzf.args $pk/fzf.in
+( /usr/bin/script -q $pk/attach.out $pk_env $launcher attach >/dev/null )
+pk_args=(${(f)"$(<$pk/fzf.args 2>/dev/null)"})
+pk_first=("${(@ps:\t:)$(head -n1 $pk/fzf.in 2>/dev/null)}")
+pk_header=${(j:|:)${(@)pk_first[2,-1]%% ##}}
+pk_missing=()
+for pk_flag in --nth=1,5 --exact --no-hscroll --tabstop=1 --header-lines=1; do
+  (( ${pk_args[(Ie)$pk_flag]} )) || pk_missing+=($pk_flag)
+done
+if (( $#pk_missing == 0 )) && [[ $pk_header == 'TAB NAME|STATUS|AGE|AGENT|SESSION|WORKSPACE|TAB|CWD' ]]; then
+  pass "the picker hands fzf --nth=1,5 --exact --no-hscroll --tabstop=1, and its header reads tab name first"
+else
+  fail "picker flags or header: missing [${pk_missing[*]}], header '$pk_header', args: ${pk_args[*]}"
+fi
+
+# 22.2 every column starts at the same place on every row
+pk_widths=(${(u)${(f)"$($pk/widths fields <$pk/fzf.in)"}})
+pk_rows_seen=$(wc -l <$pk/fzf.in 2>/dev/null)
+# padding to a narrower width would cut the widest wide value, so the value must arrive whole
+pk_whole=$(<$pk/fzf.in)
+if (( $#pk_widths == 1 && ${pk_rows_seen// /} == 6 )) && [[ $pk_widths[1] == *' '* && $pk_whole == *漢字漢字漢字* ]]; then
+  pass "every picker row pads each column to one display width, wide characters and missing values included: ${pk_widths[1]}"
+else
+  fail "picker rows ($pk_rows_seen) pad to ${#pk_widths} different widths, or cut a value: ${(j: / :)pk_widths}"
+fi
+
+# 22.3 typed text matches the tab name and the session, as plain text, and nothing else
+if [[ -z $real_fzf ]]; then
+  skip "typed text matching: fzf isn't installed"
+else
+  pk_match() { $real_fzf "${pk_args[@]}" --filter=$1 <$pk/fzf.in | while IFS= read -r l; do print -r -- "${${(@ps:\t:)l}[2]%% ##}"; done }
+  pk_42=$(pk_match 42)
+  pk_b=(${(f)"$(pk_match probe-b)"})
+  pk_none=$(pk_match cm142)
+  pk_claude=$(pk_match claude)
+  if [[ $pk_42 == 'cm-142 | sync with upstream' ]] && (( $#pk_b == 2 )) && [[ -z $pk_none && -z $pk_claude ]]; then
+    pass "typing 42 keeps only the tab name holding it (not an age or a directory), a session name keeps its rows, cm142 and an agent name keep none"
+  else
+    fail "matching: 42 -> '$pk_42', probe-b -> ${#pk_b} rows, cm142 -> '$pk_none', claude -> '$pk_claude'"
+  fi
+fi
+
+# 22.4 ps on a terminal cuts each line at the terminal's width, and the cut never leaves a line wider
+# reply: the lines ps printed at $1 columns, piped when $2 is pipe
+pk_ps() {
+  local run='stty cols $1; shift; exec "$@"'
+  [[ ${2:-} == pipe ]] && run='stty cols $1; shift; "$@" | cat'
+  rm -f -- $pk/ps.out
+  ( /usr/bin/script -q $pk/ps.out /bin/zsh -fc $run x $1 $pk_env $launcher ps >/dev/null )
+  typed $pk/ps.out
+  reply=(${(f)typed_text})
+}
+pk_ps 58
+pk_ps58=($reply)
+pk_w58=(${(f)"$(print -rl -- $pk_ps58 | $pk/widths)"})
+pk_cut58=(${(M)pk_ps58:#*··})
+pk_over58=${#${(M)pk_w58:#<59->}}
+if (( $#pk_ps58 == 6 && pk_over58 == 0 && $#pk_cut58 >= 1 )) &&
+   [[ $pk_ps58[1] == 'TAB NAME '* ]]; then
+  pass "ps at 58 columns prints no line wider than the terminal, and a cut line ends in the cut marker"
+else
+  fail "ps at 58 columns: ${#pk_ps58} lines, widths ${pk_w58[*]}"
+fi
+pk_ps 8
+pk_ps8=($reply)
+pk_w8=(${(f)"$(print -rl -- $pk_ps8 | $pk/widths)"})
+pk_wide=${(M)pk_ps8:#漢字*}
+pk_over8=${#${(M)pk_w8:#<9->}}
+if (( pk_over8 == 0 )) && [[ $pk_wide == '漢字  ··' ]]; then
+  pass "ps at 8 columns drops a wide character that crosses the cut, so no line wraps"
+else
+  fail "ps at 8 columns: widths ${pk_w8[*]}, wide row '$pk_wide'"
+fi
+
+# 22.5 piped, ps prints every line whole
+pk_ps 58 pipe
+pk_pipe=($reply)
+pk_wpipe=(${(f)"$(print -rl -- $pk_pipe | $pk/widths)"})
+pk_over58=${#${(M)pk_wpipe:#<59->}}
+if (( $#pk_pipe == 6 && pk_over58 >= 1 )) && [[ ${(j::)pk_pipe} != *··* ]] &&
+   [[ $pk_pipe[1] == 'TAB NAME '* ]]; then
+  pass "ps in a pipe prints whole lines, wider than the terminal, with no cut marker"
+else
+  fail "ps in a pipe: ${#pk_pipe} lines, widths ${pk_wpipe[*]}"
 fi
 
 print
