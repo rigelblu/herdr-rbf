@@ -8,6 +8,12 @@ Flavour releases use the version in `rbf/RBF_VERSION`; upstream's release histor
 
 ---
 
+# 🔵⋯ v0.16.1 (2026-11-22)
+## 🟠⋯ Fixed for End Users
+- 2026-11-22 - fix | After a cmux restart, Claude running in a herdr tab still tells cmux which tab shows it now and which attach process is alive there, so cmux puts its status and notifications on that tab. cmux now sends most of Claude's hooks as `hooks enqueue claude <event>`, which herdr-agent's hook shim didn't read: those hooks kept the tab and process Claude started with, and a new session after `/clear` never reached cmux. Running Claudes pick up the fix as soon as herdr-agent is installed, with no restart (#hrdr-38)
+
+---
+
 # 🔵⋯ v0.16.0 (2026-11-09)
 ## 🟠⋯ Added for End Users
 - 2026-11-09 - feat | herdr-rbf now builds on upstream Herdr's master `ee5bfb50` (2026-10-29, after 0.9.5), with every fork feature carried. Upstream's fixes since 0.9.1 reach the fork: typing echoes sooner (#5149), sessions are saved before a macOS restart (#5092) and written safely (#5152), big sessions use less CPU and memory (#5085, #4845, #4847, #4873, #4669–#4671), prefix bindings work when the terminal sends plain text (#5277), and the server keeps running when its terminal closes (#4965, #5236). The install closes every attached tab, so reattach them afterwards, and run `herdr integration install codex` once so Codex keeps reporting its session (#hrdr-33)
